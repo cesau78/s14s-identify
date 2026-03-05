@@ -35,6 +35,9 @@ jobs:
       - name: Build static docs site
         run: node scripts/buildDocsPage.js
 
+      - name: Build mock ServiceWorker
+        run: node scripts/buildMockServiceWorker.js
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
