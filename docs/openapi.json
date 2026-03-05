@@ -1,0 +1,427 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "S14S Identify - Enterprise Identifier Registry",
+    "version": "1.0.0",
+    "description": "API for managing enterprise identifiers with probabilistic matching and full audit trails."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/api/customers": {
+      "post": {
+        "summary": "Create or match a customer",
+        "description": "If a probabilistic match of 99.7% confidence or better is found, the incoming data is added as an alias to the existing record (200). Otherwise, a new customer record is created (201).\n",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "User performing the action"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matched existing customer - alias added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Customer"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New customer created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Customer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          }
+        }
+      },
+      "get": {
+        "summary": "List all active customers",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "include_deleted",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Include soft-deleted customers"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of customers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Customer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/customers/{id}": {
+      "get": {
+        "summary": "Get a customer by ID",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Customer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update a customer",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "User performing the action"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomerUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Customer updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Customer"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Soft delete a customer",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "User performing the action"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Customer soft-deleted"
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      }
+    },
+    "/api/customers/{id}/history": {
+      "get": {
+        "summary": "Get change history for a customer",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Change history array",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ChangeRecord"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Address": {
+        "type": "object",
+        "properties": {
+          "street": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "zip": {
+            "type": "string"
+          }
+        }
+      },
+      "Alias": {
+        "type": "object",
+        "required": [
+          "source_system",
+          "source_key"
+        ],
+        "properties": {
+          "source_system": {
+            "type": "string",
+            "description": "Identifier for the source system"
+          },
+          "source_key": {
+            "type": "string",
+            "description": "Primary key from the source system"
+          },
+          "original_payload": {
+            "type": "object",
+            "description": "Original POST data from the source system"
+          },
+          "added_by": {
+            "type": "string"
+          },
+          "added_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ChangeRecord": {
+        "type": "object",
+        "properties": {
+          "changed_by": {
+            "type": "string"
+          },
+          "changed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "delta": {
+            "type": "object"
+          }
+        }
+      },
+      "CustomerInput": {
+        "type": "object",
+        "required": [
+          "first_name",
+          "last_name",
+          "email",
+          "source_system",
+          "source_key"
+        ],
+        "properties": {
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "address": {
+            "$ref": "#/components/schemas/Address"
+          },
+          "source_system": {
+            "type": "string",
+            "description": "Identifier for the originating system"
+          },
+          "source_key": {
+            "type": "string",
+            "description": "Primary key in the originating system"
+          }
+        }
+      },
+      "CustomerUpdate": {
+        "type": "object",
+        "properties": {
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "address": {
+            "$ref": "#/components/schemas/Address"
+          }
+        }
+      },
+      "Customer": {
+        "type": "object",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "address": {
+            "$ref": "#/components/schemas/Address"
+          },
+          "aliases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Alias"
+            }
+          },
+          "change_history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangeRecord"
+            }
+          },
+          "created_by": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted_by": {
+            "type": "string"
+          },
+          "deleted_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  },
+  "tags": []
+}
