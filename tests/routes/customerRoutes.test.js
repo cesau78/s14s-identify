@@ -24,7 +24,7 @@ const validCustomerPayload = {
   first_name: 'John',
   last_name: 'Doe',
   email: 'john.doe@example.com',
-  phone: '555-1234',
+  phone: '(214) 555-1234',
   address: { street: '123 Main St', city: 'Springfield', state: 'IL', zip: '62701' },
   source_system: 'CRM',
   source_key: 'CRM-001'
@@ -74,7 +74,7 @@ describe('POST /customers', () => {
       .send(payload);
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/source_system/);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/source_system/)]));
   });
 
   test('returns 400 when source_key is missing', async () => {
@@ -84,7 +84,7 @@ describe('POST /customers', () => {
       .send(payload);
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/source_key/);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/source_key/)]));
   });
 
   test('returns 400 when required customer fields are missing', async () => {
@@ -93,7 +93,35 @@ describe('POST /customers', () => {
       .send({ source_system: 'CRM', source_key: '001' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/first_name/);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/first_name/)]));
+  });
+
+  test('returns 400 for invalid email format', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .send({ ...validCustomerPayload, email: 'not-an-email' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/email format/)]));
+  });
+
+  test('returns 400 for invalid phone format', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .send({ ...validCustomerPayload, phone: 'invalid-phone' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/phone format/)]));
+  });
+
+  test('normalizes phone to E.164 format', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    expect(res.status).toBe(201);
+    expect(res.body.phone).toBe('+12145551234');
   });
 
   test('defaults audit_user to anonymous when no header', async () => {
@@ -240,11 +268,11 @@ describe('PUT /customers/:id', () => {
     const res = await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
-      .send({ last_name: 'Smith', phone: '999-8888' });
+      .send({ last_name: 'Smith', phone: '(469) 888-7777' });
 
     expect(res.status).toBe(200);
     expect(res.body.last_name).toBe('Smith');
-    expect(res.body.phone).toBe('999-8888');
+    expect(res.body.phone).toBe('+14698887777');
   });
 
   test('updates address fields', async () => {
@@ -422,7 +450,7 @@ describe('Error handling (edge cases)', () => {
       .send(validCustomerPayload);
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Validation failed');
+    expect(res.body.errors).toContain('Validation failed');
     Customer.prototype.save = originalPrototypeSave;
   });
 
@@ -473,7 +501,7 @@ describe('Error handling (edge cases)', () => {
     Customer.findOne = originalFindOne;
   });
 
-  test('PUT returns 400 on validation error', async () => {
+  test('PUT returns 400 on sanitization error', async () => {
     const createRes = await request(app)
       .post('/customers')
       .set('x-user-id', 'creator')
@@ -485,6 +513,43 @@ describe('Error handling (edge cases)', () => {
       .send({ email: '' });
 
     expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/email/)]));
+  });
+
+  test('PUT returns 400 on mongoose ValidationError', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'creator')
+      .send(validCustomerPayload);
+
+    const originalSave = Customer.prototype.save;
+    const validationError = new Error('Validation failed');
+    validationError.name = 'ValidationError';
+    Customer.prototype.save = jest.fn().mockRejectedValue(validationError);
+
+    const res = await request(app)
+      .put(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'updater')
+      .send({ first_name: 'Jane' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toContain('Validation failed');
+    Customer.prototype.save = originalSave;
+  });
+
+  test('PUT returns 400 for invalid phone', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'creator')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .put(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'updater')
+      .send({ phone: 'not-a-number' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([expect.stringMatching(/phone/)]));
   });
 
   test('DELETE returns 500 on unexpected error', async () => {

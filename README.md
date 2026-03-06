@@ -1,0 +1,306 @@
+# S14S Identify
+
+**Enterprise Identifier Registry** — a REST API for consolidating customer identities across multiple source systems using probabilistic record linkage.
+
+When different systems (CRM, billing, support, etc.) each maintain their own customer records, S14S Identify serves as a single source of truth. It uses the **Fellegi-Sunter** model to determine whether an incoming record refers to an existing person, and links them automatically via an aliases array.
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [API Overview](#api-overview)
+- [Customer Matching](#customer-matching)
+  - [Fellegi-Sunter Model](#fellegi-sunter-model)
+  - [Jaro-Winkler Distance](#jaro-winkler-distance)
+  - [Field Configuration](#field-configuration)
+  - [Match Threshold](#match-threshold)
+- [Input Sanitization](#input-sanitization)
+  - [E.164 Phone Normalization](#e164-phone-normalization)
+- [Audit Trail](#audit-trail)
+- [Soft Deletes](#soft-deletes)
+- [Data Model](#data-model)
+- [Testing](#testing)
+- [Project Structure](#project-structure)
+
+---
+
+## Quick Start
+
+```bash
+# Install dependencies
+npm install
+
+# Start MongoDB locally (default: mongodb://localhost:27017/s14s-identify)
+mongod
+
+# Run the server
+npm start
+
+# Run tests with coverage
+npm test
+
+# Run build (enforces 100% coverage)
+npm run build
+```
+
+The Swagger UI is available at `http://localhost:3000/api-docs` once the server is running.
+
+---
+
+## API Overview
+
+All endpoints are served under `/customers`. The `x-user-id` header identifies who is performing the action (used for audit tracking).
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/customers` | Create or match a customer |
+| `GET` | `/customers` | List all active customers |
+| `GET` | `/customers/:id` | Get a customer by ID |
+| `PUT` | `/customers/:id` | Update a customer |
+| `DELETE` | `/customers/:id` | Soft delete a customer |
+| `GET` | `/customers/:id/history` | Get change history |
+
+### POST Behavior
+
+The `POST /customers` endpoint does not blindly create records. It runs every incoming record through the Fellegi-Sunter matching algorithm against all existing customers:
+
+- **Score >= 0.997 (99.7% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
+- **Score < 0.997** — a new customer record is created with the incoming data as its first alias. The API returns `201`.
+
+This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically.
+
+---
+
+## Customer Matching
+
+### Fellegi-Sunter Model
+
+The matching engine implements the [Fellegi-Sunter model](https://courses.cs.washington.edu/courses/cse590q/04au/papers/Fellegi69.pdf) (1969), the foundational framework for probabilistic record linkage used across government agencies, healthcare systems, and financial institutions worldwide.
+
+The core idea: for each comparison field, we define two probabilities:
+
+- **m-probability** `P(agree | true match)` — how often this field agrees when two records truly refer to the same person
+- **u-probability** `P(agree | not a match)` — how often this field agrees purely by coincidence among unrelated records
+
+From these, we compute:
+
+- **Agreement weight** = `log2(m / u)` — reward for a field matching. Fields that are highly distinctive (low u) produce large positive weights.
+- **Disagreement weight** = `log2((1 - m) / (1 - u))` — penalty for a field not matching. Fields with high m produce large negative penalties when they disagree.
+
+The raw composite score is converted to a normalized probability between 0 and 1:
+
+```
+P(match) = (score - minPossibleScore) / (maxPossibleScore - minPossibleScore)
+```
+
+Where `maxPossibleScore` is the sum of all agreement weights (perfect match) and `minPossibleScore` is the sum of all disagreement weights (complete mismatch).
+
+### Jaro-Winkler Distance
+
+For name and address fields, exact matching is too rigid — typos, abbreviations, and data entry inconsistencies are common. The engine uses [Jaro-Winkler distance](https://en.wikipedia.org/wiki/Jaro%E2%80%93Winkler_distance) for fuzzy string comparison.
+
+Jaro-Winkler is specifically designed for short strings like names. It:
+
+1. Computes the **Jaro similarity** based on the number and order of matching characters
+2. Applies a **Winkler prefix bonus** that gives extra weight to strings sharing a common prefix (reflecting the empirical observation that typos are less common at the start of a name)
+
+The result is a similarity score between 0 (completely different) and 1 (identical). Each field has a configurable similarity threshold that determines whether the comparison counts as "agreement."
+
+For email and phone fields, exact matching is used — these identifiers are either right or wrong.
+
+### Field Configuration
+
+| Field | m | u | Compare | Threshold | Rationale |
+|-------|---|---|---------|-----------|-----------|
+| `first_name` | 0.95 | 0.005 | Jaro-Winkler | 0.85 | True matches agree 95% of the time; random pairs share a first name ~0.5% |
+| `last_name` | 0.95 | 0.002 | Jaro-Winkler | 0.85 | Last names are more distinctive than first names |
+| `email` | 0.90 | 0.0001 | Exact | 1.0 | Emails are nearly unique; lower m accounts for people with multiple addresses |
+| `phone` | 0.85 | 0.0005 | Exact | 1.0 | Phones change more often; still highly distinctive |
+| `address_composite` | 0.80 | 0.005 | Jaro-Winkler | 0.80 | Addresses change frequently; composite of street, city, state, zip |
+
+The `email` field carries the most discriminating power due to its extreme m/u ratio — an email match provides strong evidence, while an email mismatch is heavily penalized.
+
+### Match Threshold
+
+The match threshold is set at **0.997** (99.7% confidence). This was chosen to minimize false positives — incorrectly merging two distinct people is far more damaging than creating a duplicate record that can be merged later.
+
+When both records have no overlapping data (all fields empty), the score is 0. Fields where both records are missing are skipped entirely — they neither help nor hurt the score.
+
+---
+
+## Input Sanitization
+
+All input is sanitized before storage or matching. The sanitization layer validates and normalizes data, returning an array of all validation errors at once rather than failing on the first error.
+
+**POST validation requires:**
+- `source_system` and `source_key` (identifies the originating system)
+- `first_name`, `last_name`, `email`
+- Valid email format
+- Valid phone format (if provided; phone is optional)
+
+**PUT validation enforces:**
+- Fields that are present cannot be set to empty (prevents accidental data erasure)
+- Email format is validated if email is being updated
+- Phone format is validated if phone is being updated
+
+All string fields are trimmed. Email is lowercased. Address state is uppercased.
+
+### E.164 Phone Normalization
+
+Phone numbers are stored in [E.164 format](https://www.itu.int/rec/T-REC-E.164), the international standard for phone number formatting defined by the ITU. E.164 numbers:
+
+- Begin with a `+` followed by the country code
+- Contain no spaces, dashes, or parentheses
+- Are a maximum of 15 digits
+
+Examples of normalization:
+
+| Input | Normalized |
+|-------|-----------|
+| `(214) 867-5309` | `+12148675309` |
+| `214-867-5309` | `+12148675309` |
+| `+1 214 867 5309` | `+12148675309` |
+| `020 7946 0958` (GB) | `+442079460958` |
+
+The normalization uses Google's [libphonenumber](https://github.com/google/libphonenumber) library (via `libphonenumber-js`), which validates against real telephony rules — not just digit counts. Invalid area codes, impossible exchanges, and malformed numbers are all rejected.
+
+The default country is `US`, but an explicit country code can be provided for international numbers.
+
+---
+
+## Audit Trail
+
+Every mutation is tracked with full context:
+
+- **Who** made the change (`x-user-id` header, defaults to `anonymous`)
+- **When** the change was made (timestamp)
+- **What** changed (field-level delta with `from` and `to` values)
+
+The `change_history` array on each customer record is append-only. Deltas are computed by comparing the original document state against the updated state across all auditable fields:
+
+```
+first_name, last_name, email, phone,
+address.street, address.city, address.state, address.zip
+```
+
+Example delta entry:
+
+```json
+{
+  "changed_by": "admin-user",
+  "changed_at": "2026-03-06T14:30:00.000Z",
+  "delta": {
+    "email": {
+      "from": "john@oldmail.com",
+      "to": "john@newmail.com"
+    },
+    "address.state": {
+      "from": "il",
+      "to": "TX"
+    }
+  }
+}
+```
+
+Alias additions are tracked as well, recording the `source_system` and `source_key` that was linked.
+
+---
+
+## Soft Deletes
+
+Records are never physically removed. A `DELETE` request sets:
+
+- `deleted_by` — who performed the deletion
+- `deleted_at` — when the deletion occurred
+
+Soft-deleted records are excluded from all queries by default. Use `?include_deleted=true` on the list endpoint to include them. The matching engine only considers active (non-deleted) records as candidates.
+
+---
+
+## Data Model
+
+### Customer
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `first_name` | String | Required |
+| `last_name` | String | Required |
+| `email` | String | Required, stored lowercase |
+| `phone` | String | Stored in E.164 format |
+| `address` | Object | `{ street, city, state, zip }` — state is uppercased |
+| `aliases` | Array | Cross-system identity links (see below) |
+| `change_history` | Array | Audit trail entries |
+| `created_by` | String | User who created the record |
+| `created_at` | Date | Creation timestamp |
+| `updated_by` | String | Last user to modify the record |
+| `updated_at` | Date | Last modification timestamp |
+| `deleted_by` | String | User who soft-deleted the record |
+| `deleted_at` | Date | Soft-deletion timestamp |
+
+### Alias
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_system` | String | Originating system identifier (e.g., `CRM`, `BILLING`) |
+| `source_key` | String | Primary key in the originating system |
+| `original_payload` | Mixed | Complete original POST body, preserved as-is |
+| `added_by` | String | User who linked this alias |
+| `added_at` | Date | When the alias was linked |
+
+### Indexes
+
+- `deleted_at` — fast filtering for active/deleted records
+- `email` — candidate lookup during matching
+- `aliases.source_system + aliases.source_key` — compound index for source system lookups
+
+---
+
+## Testing
+
+The project enforces **100% code coverage** across statements, branches, functions, and lines. The build fails if any metric drops below 100%.
+
+```bash
+# Run tests with coverage report
+npm test
+
+# Build (tests + 100% coverage enforcement)
+npm run build
+```
+
+Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
+
+Current status: **143 tests, 100% coverage across all metrics.**
+
+---
+
+## Project Structure
+
+```
+src/
+  app.js                          Express application setup
+  server.js                       Entry point (connects to DB, starts server)
+  database/
+    connection.js                 MongoDB connection management
+  middleware/
+    auditContext.js                Extracts x-user-id header for audit tracking
+  models/
+    customer.js                   Mongoose schema and indexes
+  routes/
+    customerRoutes.js             REST endpoints with Swagger annotations
+  services/
+    auditDelta.js                 Field-level change delta computation
+    customerMatchingService.js    Fellegi-Sunter probabilistic matching
+    inputSanitizer.js             Input validation and E.164 normalization
+  swagger/
+    swaggerConfig.js              OpenAPI spec generation
+
+tests/
+  database/connection.test.js
+  middleware/auditContext.test.js
+  models/customer.test.js
+  routes/customerRoutes.test.js
+  services/
+    auditDelta.test.js
+    customerMatchingService.test.js
+    inputSanitizer.test.js
+  swagger/swaggerConfig.test.js
+```

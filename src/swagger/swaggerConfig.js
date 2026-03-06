@@ -6,7 +6,12 @@ const swaggerOptions = {
     info: {
       title: 'S14S Identify - Enterprise Identifier Registry',
       version: '1.0.0',
-      description: 'API for managing enterprise identifiers with probabilistic matching and full audit trails.'
+      description:
+        'REST API for consolidating customer identities across multiple source systems. ' +
+        'Uses the Fellegi-Sunter probabilistic record linkage model with Jaro-Winkler ' +
+        'distance for fuzzy name/address matching and exact matching for email/phone. ' +
+        'Phone numbers are normalized to E.164 format. All mutations are tracked with ' +
+        'field-level audit deltas. Records are soft-deleted and linked via an aliases array.'
     },
     servers: [
       {
