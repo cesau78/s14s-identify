@@ -1,12 +1,16 @@
 const {
-  calculateConfidence,
+  calculateFellegiSunterScore,
   findMatch,
   normalizeString,
   buildAddressComposite,
-  MATCH_THRESHOLD
+  compareField,
+  computeAgreementWeight,
+  computeDisagreementWeight,
+  MATCH_THRESHOLD,
+  FIELD_CONFIG
 } = require('../../src/services/customerMatchingService');
 
-describe('Customer Matching Service', () => {
+describe('Customer Matching Service (Fellegi-Sunter)', () => {
   describe('normalizeString', () => {
     test('trims and lowercases a string', () => {
       expect(normalizeString('  Hello World  ')).toBe('hello world');
@@ -38,7 +42,85 @@ describe('Customer Matching Service', () => {
     });
   });
 
-  describe('calculateConfidence', () => {
+  describe('computeAgreementWeight', () => {
+    test('returns positive weight for m >> u', () => {
+      const weight = computeAgreementWeight(0.95, 0.005);
+      expect(weight).toBeGreaterThan(0);
+    });
+
+    test('higher m/u ratio produces larger weight', () => {
+      const emailWeight = computeAgreementWeight(0.90, 0.0001);
+      const nameWeight = computeAgreementWeight(0.95, 0.005);
+      expect(emailWeight).toBeGreaterThan(nameWeight);
+    });
+  });
+
+  describe('computeDisagreementWeight', () => {
+    test('returns negative weight when m is high', () => {
+      const weight = computeDisagreementWeight(0.95, 0.005);
+      expect(weight).toBeLessThan(0);
+    });
+  });
+
+  describe('compareField', () => {
+    test('returns null when both values are empty', () => {
+      const config = FIELD_CONFIG.first_name;
+      expect(compareField('', '', config)).toBeNull();
+    });
+
+    test('returns false when one value is empty', () => {
+      const config = FIELD_CONFIG.first_name;
+      expect(compareField('john', '', config)).toBe(false);
+      expect(compareField('', 'john', config)).toBe(false);
+    });
+
+    test('uses Jaro-Winkler for name fields', () => {
+      const config = FIELD_CONFIG.first_name;
+      expect(compareField('john', 'john', config)).toBe(true);
+      expect(compareField('john', 'jon', config)).toBe(true); // close enough for JW
+      expect(compareField('john', 'xxxxxx', config)).toBe(false);
+    });
+
+    test('uses exact match for email', () => {
+      const config = FIELD_CONFIG.email;
+      expect(compareField('john@example.com', 'john@example.com', config)).toBe(true);
+      expect(compareField('john@example.com', 'jon@example.com', config)).toBe(false);
+    });
+
+    test('uses exact match for phone', () => {
+      const config = FIELD_CONFIG.phone;
+      expect(compareField('555-1234', '555-1234', config)).toBe(true);
+      expect(compareField('555-1234', '555-1235', config)).toBe(false);
+    });
+
+    test('uses Jaro-Winkler for address with lower threshold', () => {
+      const config = FIELD_CONFIG.address_composite;
+      expect(compareField('123 main st springfield il', '123 main st springfield il', config)).toBe(true);
+      expect(compareField('123 main st springfield il', '456 oak ave chicago ny', config)).toBe(false);
+    });
+  });
+
+  describe('FIELD_CONFIG', () => {
+    test('has expected fields defined', () => {
+      expect(FIELD_CONFIG.first_name).toBeDefined();
+      expect(FIELD_CONFIG.last_name).toBeDefined();
+      expect(FIELD_CONFIG.email).toBeDefined();
+      expect(FIELD_CONFIG.phone).toBeDefined();
+      expect(FIELD_CONFIG.address_composite).toBeDefined();
+    });
+
+    test('all fields have m, u, compare, and similarityThreshold', () => {
+      for (const [, config] of Object.entries(FIELD_CONFIG)) {
+        expect(config.m).toBeGreaterThan(0);
+        expect(config.u).toBeGreaterThan(0);
+        expect(config.m).toBeGreaterThan(config.u);
+        expect(['exact', 'jaroWinkler']).toContain(config.compare);
+        expect(config.similarityThreshold).toBeDefined();
+      }
+    });
+  });
+
+  describe('calculateFellegiSunterScore', () => {
     test('returns 1.0 for identical records', () => {
       const record = {
         first_name: 'John',
@@ -47,31 +129,45 @@ describe('Customer Matching Service', () => {
         phone: '555-1234',
         address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
       };
-      expect(calculateConfidence(record, record)).toBe(1);
+      expect(calculateFellegiSunterScore(record, record)).toBe(1);
     });
 
-    test('returns 0 for completely different records', () => {
+    test('returns low score for completely different records', () => {
       const a = { first_name: 'John', last_name: 'Doe', email: 'john@example.com' };
       const b = { first_name: 'Xxxxx', last_name: 'Yyyyy', email: 'zzz@nowhere.net' };
-      const confidence = calculateConfidence(a, b);
-      expect(confidence).toBeLessThan(MATCH_THRESHOLD);
+      const score = calculateFellegiSunterScore(a, b);
+      expect(score).toBeLessThan(MATCH_THRESHOLD);
     });
 
-    test('returns high confidence for nearly identical records', () => {
-      const a = { first_name: 'John', last_name: 'Doe', email: 'john.doe@example.com', phone: '555-1234' };
-      const b = { first_name: 'John', last_name: 'Doe', email: 'john.doe@example.com', phone: '555-1234' };
-      expect(calculateConfidence(a, b)).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+    test('returns high score for matching records with minor name variation', () => {
+      const a = { first_name: 'John', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
+      const b = { first_name: 'Jon', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
+      const score = calculateFellegiSunterScore(a, b);
+      expect(score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
     });
 
     test('returns 0 when both records have no data', () => {
-      expect(calculateConfidence({}, {})).toBe(0);
+      expect(calculateFellegiSunterScore({}, {})).toBe(0);
     });
 
-    test('handles one side having a field the other does not', () => {
+    test('penalizes when one side is missing a field', () => {
       const a = { first_name: 'John', last_name: 'Doe', email: 'john@example.com' };
       const b = { first_name: 'John', last_name: 'Doe', email: '' };
-      const confidence = calculateConfidence(a, b);
-      expect(confidence).toBeLessThan(1);
+      const score = calculateFellegiSunterScore(a, b);
+      expect(score).toBeLessThan(1);
+    });
+
+    test('email disagreement heavily penalizes score', () => {
+      const base = { first_name: 'John', last_name: 'Doe', phone: '555-1234' };
+      const sameEmail = calculateFellegiSunterScore(
+        { ...base, email: 'john@example.com' },
+        { ...base, email: 'john@example.com' }
+      );
+      const diffEmail = calculateFellegiSunterScore(
+        { ...base, email: 'john@example.com' },
+        { ...base, email: 'different@other.com' }
+      );
+      expect(sameEmail - diffEmail).toBeGreaterThan(0.25);
     });
   });
 
@@ -82,7 +178,7 @@ describe('Customer Matching Service', () => {
   });
 
   describe('findMatch', () => {
-    test('returns match when confidence >= threshold', async () => {
+    test('returns match when score >= threshold', async () => {
       const existingCustomer = {
         _id: 'abc123',
         first_name: 'John',
@@ -92,9 +188,7 @@ describe('Customer Matching Service', () => {
         address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
       };
 
-      const mockModel = {
-        find: jest.fn().mockResolvedValue([existingCustomer])
-      };
+      const mockModel = { find: jest.fn().mockResolvedValue([existingCustomer]) };
 
       const incoming = {
         first_name: 'John',
@@ -109,7 +203,7 @@ describe('Customer Matching Service', () => {
       expect(result.confidence).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
     });
 
-    test('returns null match when confidence < threshold', async () => {
+    test('returns null match when score < threshold', async () => {
       const existingCustomer = {
         _id: 'abc123',
         first_name: 'Alice',
@@ -119,9 +213,7 @@ describe('Customer Matching Service', () => {
         address: { street: '456 Oak', city: 'Chicago', state: 'IL', zip: '60601' }
       };
 
-      const mockModel = {
-        find: jest.fn().mockResolvedValue([existingCustomer])
-      };
+      const mockModel = { find: jest.fn().mockResolvedValue([existingCustomer]) };
 
       const incoming = {
         first_name: 'John',
@@ -135,9 +227,7 @@ describe('Customer Matching Service', () => {
     });
 
     test('returns null match when no candidates exist', async () => {
-      const mockModel = {
-        find: jest.fn().mockResolvedValue([])
-      };
+      const mockModel = { find: jest.fn().mockResolvedValue([]) };
 
       const result = await findMatch(mockModel, { first_name: 'John', last_name: 'Doe', email: 'john@example.com' });
       expect(result.match).toBeNull();

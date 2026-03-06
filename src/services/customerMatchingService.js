@@ -1,14 +1,51 @@
-const stringSimilarity = require('string-similarity');
+const jaroWinkler = require('jaro-winkler');
+
+// Fellegi-Sunter probabilistic record linkage
+//
+// For each comparison field we define:
+//   m = P(agree | true match)     — how often this field agrees when records truly match
+//   u = P(agree | not a match)    — how often this field agrees by coincidence
+//
+// Agreement weight:   log2(m / u)
+// Disagreement weight: log2((1 - m) / (1 - u))
+//
+// The composite score is the sum of per-field weights.
+// We convert to a probability via: P(match) = (score - min) / (max - min)
+
+const FIELD_CONFIG = {
+  first_name: {
+    m: 0.95,   // true matches agree 95% (typos, nicknames reduce this)
+    u: 0.005,  // random pairs share a first name ~0.5%
+    compare: 'jaroWinkler',
+    similarityThreshold: 0.85
+  },
+  last_name: {
+    m: 0.95,
+    u: 0.002,  // last names are more distinctive
+    compare: 'jaroWinkler',
+    similarityThreshold: 0.85
+  },
+  email: {
+    m: 0.90,
+    u: 0.0001, // emails are nearly unique
+    compare: 'exact',
+    similarityThreshold: 1.0
+  },
+  phone: {
+    m: 0.85,
+    u: 0.0005,
+    compare: 'exact',
+    similarityThreshold: 1.0
+  },
+  address_composite: {
+    m: 0.80,
+    u: 0.005,
+    compare: 'jaroWinkler',
+    similarityThreshold: 0.80
+  }
+};
 
 const MATCH_THRESHOLD = 0.997;
-
-const FIELD_WEIGHTS = {
-  first_name: 0.2,
-  last_name: 0.25,
-  email: 0.35,
-  phone: 0.1,
-  address_composite: 0.1
-};
 
 function normalizeString(value) {
   if (!value) return '';
@@ -24,10 +61,28 @@ function buildAddressComposite(address) {
   );
 }
 
-function calculateConfidence(incoming, existing) {
-  let totalWeight = 0;
-  let weightedScore = 0;
+function computeAgreementWeight(m, u) {
+  return Math.log2(m / u);
+}
 
+function computeDisagreementWeight(m, u) {
+  return Math.log2((1 - m) / (1 - u));
+}
+
+function compareField(a, b, config) {
+  if (!a && !b) return null; // both missing — skip field
+
+  if (!a || !b) return false; // one missing — disagreement
+
+  if (config.compare === 'jaroWinkler') {
+    const similarity = jaroWinkler(a, b);
+    return similarity >= config.similarityThreshold;
+  }
+
+  return a === b;
+}
+
+function calculateFellegiSunterScore(incoming, existing) {
   const pairs = [
     { field: 'first_name', a: normalizeString(incoming.first_name), b: normalizeString(existing.first_name) },
     { field: 'last_name', a: normalizeString(incoming.last_name), b: normalizeString(existing.last_name) },
@@ -36,23 +91,32 @@ function calculateConfidence(incoming, existing) {
     { field: 'address_composite', a: buildAddressComposite(incoming.address), b: buildAddressComposite(existing.address) }
   ];
 
+  let score = 0;
+  let maxScore = 0;
+  let minScore = 0;
+
   for (const { field, a, b } of pairs) {
-    if (!a && !b) continue;
+    const config = FIELD_CONFIG[field];
+    const agreeWeight = computeAgreementWeight(config.m, config.u);
+    const disagreeWeight = computeDisagreementWeight(config.m, config.u);
 
-    const weight = FIELD_WEIGHTS[field];
-    totalWeight += weight;
+    const agreement = compareField(a, b, config);
 
-    if (!a || !b) {
-      continue;
+    if (agreement === null) continue; // both empty — skip
+
+    maxScore += agreeWeight;
+    minScore += disagreeWeight;
+
+    if (agreement) {
+      score += agreeWeight;
+    } else {
+      score += disagreeWeight;
     }
-
-    const similarity = stringSimilarity.compareTwoStrings(a, b);
-    weightedScore += similarity * weight;
   }
 
-  if (totalWeight === 0) return 0;
+  if (maxScore === minScore) return 0;
 
-  return weightedScore / totalWeight;
+  return (score - minScore) / (maxScore - minScore);
 }
 
 async function findMatch(Customer, incomingData) {
@@ -62,7 +126,7 @@ async function findMatch(Customer, incomingData) {
   let bestConfidence = 0;
 
   for (const candidate of candidates) {
-    const confidence = calculateConfidence(incomingData, candidate);
+    const confidence = calculateFellegiSunterScore(incomingData, candidate);
     if (confidence > bestConfidence) {
       bestConfidence = confidence;
       bestMatch = candidate;
@@ -77,9 +141,13 @@ async function findMatch(Customer, incomingData) {
 }
 
 module.exports = {
-  calculateConfidence,
+  calculateFellegiSunterScore,
   findMatch,
   normalizeString,
   buildAddressComposite,
-  MATCH_THRESHOLD
+  compareField,
+  computeAgreementWeight,
+  computeDisagreementWeight,
+  MATCH_THRESHOLD,
+  FIELD_CONFIG
 };
