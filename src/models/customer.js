@@ -1,18 +1,6 @@
 const mongoose = require('mongoose');
-
-const changeRecordSchema = new mongoose.Schema({
-  changed_by: { type: String, required: true },
-  changed_at: { type: Date, required: true, default: Date.now },
-  delta: { type: mongoose.Schema.Types.Mixed, required: true }
-}, { _id: false });
-
-const aliasSchema = new mongoose.Schema({
-  source_system: { type: String, required: true },
-  source_key: { type: String, required: true },
-  original_payload: { type: mongoose.Schema.Types.Mixed, required: true },
-  added_by: { type: String, required: true },
-  added_at: { type: Date, required: true, default: Date.now }
-}, { _id: true });
+const aliasSchema = require('./alias');
+const changeRecordSchema = require('./changeRecord');
 
 const customerSchema = new mongoose.Schema({
   first_name: { type: String, required: true },

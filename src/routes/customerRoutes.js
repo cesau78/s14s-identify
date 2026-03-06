@@ -69,6 +69,20 @@ function shallowCustomerResponse(customer) {
  *         added_at:
  *           type: string
  *           format: date-time
+ *         match_confidence:
+ *           type: number
+ *           nullable: true
+ *           description: >
+ *             Fellegi-Sunter match confidence score (0-1) when this alias was linked
+ *             to an existing record. Null for the first alias (record creation).
+ *           example: 0.998
+ *         match_algorithm:
+ *           type: string
+ *           nullable: true
+ *           description: >
+ *             Algorithm used for matching (e.g. "fellegi-sunter").
+ *             Null for the first alias (record creation).
+ *           example: 'fellegi-sunter'
  *     ChangeRecord:
  *       type: object
  *       description: An audit trail entry recording who changed what and when.
@@ -272,7 +286,7 @@ router.post('/', async (req, res) => {
 
     const { source_system, source_key, ...customerFields } = sanitized;
 
-    const { match } = await findMatch(Customer, customerFields);
+    const { match, confidence } = await findMatch(Customer, customerFields);
 
     if (match) {
       match.aliases.push({
@@ -280,7 +294,9 @@ router.post('/', async (req, res) => {
         source_key,
         original_payload: req.body,
         added_by: req.audit_user,
-        added_at: new Date()
+        added_at: new Date(),
+        match_confidence: confidence,
+        match_algorithm: 'fellegi-sunter'
       });
       match.updated_by = req.audit_user;
       match.updated_at = new Date();
@@ -302,7 +318,9 @@ router.post('/', async (req, res) => {
         source_key,
         original_payload: req.body,
         added_by: req.audit_user,
-        added_at: now
+        added_at: now,
+        match_confidence: null,
+        match_algorithm: null
       }],
       change_history: [],
       created_by: req.audit_user,

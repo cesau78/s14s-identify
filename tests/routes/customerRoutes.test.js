@@ -43,6 +43,8 @@ describe('POST /customers', () => {
     expect(res.body.aliases).toHaveLength(1);
     expect(res.body.aliases[0].source_system).toBe('CRM');
     expect(res.body.aliases[0].source_key).toBe('CRM-001');
+    expect(res.body.aliases[0].match_confidence).toBeNull();
+    expect(res.body.aliases[0].match_algorithm).toBeNull();
     expect(res.body.created_by).toBe('tester');
   });
 
@@ -64,6 +66,8 @@ describe('POST /customers', () => {
     expect(res.status).toBe(200);
     expect(res.body.aliases).toHaveLength(2);
     expect(res.body.aliases[1].source_system).toBe('ERP');
+    expect(res.body.aliases[1].match_confidence).toBeGreaterThanOrEqual(0.997);
+    expect(res.body.aliases[1].match_algorithm).toBe('fellegi-sunter');
     expect(res.body.updated_by).toBe('tester-2');
   });
 
