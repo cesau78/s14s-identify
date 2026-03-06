@@ -10,7 +10,7 @@ app.use(express.json());
 app.use(auditContext);
 
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-app.use('/api/customers', customerRoutes);
+app.use('/customers', customerRoutes);
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });

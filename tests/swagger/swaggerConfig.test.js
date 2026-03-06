@@ -9,6 +9,6 @@ describe('Swagger Configuration', () => {
 
   test('includes paths from route annotations', () => {
     expect(swaggerSpec.paths).toBeDefined();
-    expect(swaggerSpec.paths['/api/customers']).toBeDefined();
+    expect(swaggerSpec.paths['/customers']).toBeDefined();
   });
 });

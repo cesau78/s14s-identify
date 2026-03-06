@@ -148,7 +148,7 @@ function shallowCustomerResponse(customer) {
 
 /**
  * @swagger
- * /api/customers:
+ * /customers:
  *   post:
  *     summary: Create or match a customer
  *     description: >
@@ -245,7 +245,7 @@ router.post('/', async (req, res) => {
 
 /**
  * @swagger
- * /api/customers:
+ * /customers:
  *   get:
  *     summary: List all active customers
  *     tags: [Customers]
@@ -277,7 +277,7 @@ router.get('/', async (req, res) => {
 
 /**
  * @swagger
- * /api/customers/{id}:
+ * /customers/{id}:
  *   get:
  *     summary: Get a customer by ID
  *     tags: [Customers]
@@ -314,7 +314,7 @@ router.get('/:id', async (req, res) => {
 
 /**
  * @swagger
- * /api/customers/{id}:
+ * /customers/{id}:
  *   put:
  *     summary: Update a customer
  *     tags: [Customers]
@@ -392,7 +392,7 @@ router.put('/:id', async (req, res) => {
 
 /**
  * @swagger
- * /api/customers/{id}:
+ * /customers/{id}:
  *   delete:
  *     summary: Soft delete a customer
  *     tags: [Customers]
@@ -440,7 +440,7 @@ router.delete('/:id', async (req, res) => {
 
 /**
  * @swagger
- * /api/customers/{id}/history:
+ * /customers/{id}/history:
  *   get:
  *     summary: Get change history for a customer
  *     tags: [Customers]

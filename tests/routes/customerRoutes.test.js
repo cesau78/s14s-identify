@@ -30,10 +30,10 @@ const validCustomerPayload = {
   source_key: 'CRM-001'
 };
 
-describe('POST /api/customers', () => {
+describe('POST /customers', () => {
   test('creates a new customer and returns 201', async () => {
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
@@ -48,12 +48,12 @@ describe('POST /api/customers', () => {
 
   test('matches existing customer and returns 200 with alias added', async () => {
     await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester-2')
       .send({
         ...validCustomerPayload,
@@ -70,7 +70,7 @@ describe('POST /api/customers', () => {
   test('returns 400 when source_system is missing', async () => {
     const { source_system, ...payload } = validCustomerPayload;
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(payload);
 
     expect(res.status).toBe(400);
@@ -80,7 +80,7 @@ describe('POST /api/customers', () => {
   test('returns 400 when source_key is missing', async () => {
     const { source_key, ...payload } = validCustomerPayload;
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(payload);
 
     expect(res.status).toBe(400);
@@ -89,7 +89,7 @@ describe('POST /api/customers', () => {
 
   test('returns 400 when required customer fields are missing', async () => {
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send({ source_system: 'CRM', source_key: '001' });
 
     expect(res.status).toBe(400);
@@ -98,7 +98,7 @@ describe('POST /api/customers', () => {
 
   test('defaults audit_user to anonymous when no header', async () => {
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(validCustomerPayload);
 
     expect(res.status).toBe(201);
@@ -107,16 +107,16 @@ describe('POST /api/customers', () => {
 
   test('does not match soft-deleted customers', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'tester');
 
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send({ ...validCustomerPayload, source_system: 'NEW', source_key: 'NEW-1' });
 
@@ -124,98 +124,98 @@ describe('POST /api/customers', () => {
   });
 });
 
-describe('GET /api/customers', () => {
+describe('GET /customers', () => {
   test('returns empty array when no customers exist', async () => {
-    const res = await request(app).get('/api/customers');
+    const res = await request(app).get('/customers');
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
 
   test('returns active customers', async () => {
     await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(validCustomerPayload);
 
-    const res = await request(app).get('/api/customers');
+    const res = await request(app).get('/customers');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
   });
 
   test('excludes soft-deleted customers by default', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'tester');
 
-    const res = await request(app).get('/api/customers');
+    const res = await request(app).get('/customers');
     expect(res.body).toHaveLength(0);
   });
 
   test('includes soft-deleted customers when include_deleted=true', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'tester');
 
-    const res = await request(app).get('/api/customers?include_deleted=true');
+    const res = await request(app).get('/customers?include_deleted=true');
     expect(res.body).toHaveLength(1);
   });
 });
 
-describe('GET /api/customers/:id', () => {
+describe('GET /customers/:id', () => {
   test('returns a customer by ID', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(validCustomerPayload);
 
-    const res = await request(app).get(`/api/customers/${createRes.body._id}`);
+    const res = await request(app).get(`/customers/${createRes.body._id}`);
     expect(res.status).toBe(200);
     expect(res.body.first_name).toBe('John');
   });
 
   test('returns 404 for non-existent ID', async () => {
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/api/customers/${fakeId}`);
+    const res = await request(app).get(`/customers/${fakeId}`);
     expect(res.status).toBe(404);
   });
 
   test('returns 404 for invalid ID format', async () => {
-    const res = await request(app).get('/api/customers/invalid-id');
+    const res = await request(app).get('/customers/invalid-id');
     expect(res.status).toBe(404);
   });
 
   test('returns 404 for soft-deleted customer', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'tester');
 
-    const res = await request(app).get(`/api/customers/${createRes.body._id}`);
+    const res = await request(app).get(`/customers/${createRes.body._id}`);
     expect(res.status).toBe(404);
   });
 });
 
-describe('PUT /api/customers/:id', () => {
+describe('PUT /customers/:id', () => {
   test('updates customer fields and tracks audit delta', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane', email: 'jane@example.com' });
 
@@ -225,7 +225,7 @@ describe('PUT /api/customers/:id', () => {
     expect(res.body.updated_by).toBe('updater');
     expect(res.body.updated_at).toBeTruthy();
 
-    const historyRes = await request(app).get(`/api/customers/${createRes.body._id}/history`);
+    const historyRes = await request(app).get(`/customers/${createRes.body._id}/history`);
     expect(historyRes.body).toHaveLength(1);
     expect(historyRes.body[0].changed_by).toBe('updater');
     expect(historyRes.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
@@ -233,12 +233,12 @@ describe('PUT /api/customers/:id', () => {
 
   test('updates last_name and phone fields', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ last_name: 'Smith', phone: '999-8888' });
 
@@ -249,11 +249,11 @@ describe('PUT /api/customers/:id', () => {
 
   test('updates address fields', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ address: { city: 'Chicago' } });
 
@@ -264,25 +264,25 @@ describe('PUT /api/customers/:id', () => {
 
   test('records no delta when nothing changed', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'John' });
 
     expect(res.status).toBe(200);
 
-    const historyRes = await request(app).get(`/api/customers/${createRes.body._id}/history`);
+    const historyRes = await request(app).get(`/customers/${createRes.body._id}/history`);
     expect(historyRes.body).toHaveLength(0);
   });
 
   test('returns 404 for non-existent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .put(`/api/customers/${fakeId}`)
+      .put(`/customers/${fakeId}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
@@ -291,7 +291,7 @@ describe('PUT /api/customers/:id', () => {
 
   test('returns 404 for invalid ID format', async () => {
     const res = await request(app)
-      .put('/api/customers/invalid-id')
+      .put('/customers/invalid-id')
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
@@ -300,16 +300,16 @@ describe('PUT /api/customers/:id', () => {
 
   test('returns 404 for soft-deleted customer', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'tester');
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
@@ -317,15 +317,15 @@ describe('PUT /api/customers/:id', () => {
   });
 });
 
-describe('DELETE /api/customers/:id', () => {
+describe('DELETE /customers/:id', () => {
   test('soft deletes a customer', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'deleter');
 
     expect(res.status).toBe(200);
@@ -339,7 +339,7 @@ describe('DELETE /api/customers/:id', () => {
   test('returns 404 for non-existent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .delete(`/api/customers/${fakeId}`)
+      .delete(`/customers/${fakeId}`)
       .set('x-user-id', 'deleter');
 
     expect(res.status).toBe(404);
@@ -347,7 +347,7 @@ describe('DELETE /api/customers/:id', () => {
 
   test('returns 404 for invalid ID format', async () => {
     const res = await request(app)
-      .delete('/api/customers/invalid-id')
+      .delete('/customers/invalid-id')
       .set('x-user-id', 'deleter');
 
     expect(res.status).toBe(404);
@@ -355,35 +355,35 @@ describe('DELETE /api/customers/:id', () => {
 
   test('returns 404 when deleting already deleted customer', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'deleter');
 
     const res = await request(app)
-      .delete(`/api/customers/${createRes.body._id}`)
+      .delete(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'deleter');
 
     expect(res.status).toBe(404);
   });
 });
 
-describe('GET /api/customers/:id/history', () => {
+describe('GET /customers/:id/history', () => {
   test('returns change history for a customer', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
-    const res = await request(app).get(`/api/customers/${createRes.body._id}/history`);
+    const res = await request(app).get(`/customers/${createRes.body._id}/history`);
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
@@ -391,12 +391,12 @@ describe('GET /api/customers/:id/history', () => {
 
   test('returns 404 for non-existent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/api/customers/${fakeId}/history`);
+    const res = await request(app).get(`/customers/${fakeId}/history`);
     expect(res.status).toBe(404);
   });
 
   test('returns 404 for invalid ID format', async () => {
-    const res = await request(app).get('/api/customers/invalid-id/history');
+    const res = await request(app).get('/customers/invalid-id/history');
     expect(res.status).toBe(404);
   });
 });
@@ -417,7 +417,7 @@ describe('Error handling (edge cases)', () => {
     Customer.prototype.save = jest.fn().mockRejectedValue(validationError);
 
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
@@ -431,7 +431,7 @@ describe('Error handling (edge cases)', () => {
     Customer.find = jest.fn().mockRejectedValue(new Error('db down'));
 
     const res = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
@@ -444,7 +444,7 @@ describe('Error handling (edge cases)', () => {
     const originalFind = Customer.find;
     Customer.find = jest.fn().mockRejectedValue(new Error('db down'));
 
-    const res = await request(app).get('/api/customers');
+    const res = await request(app).get('/customers');
     expect(res.status).toBe(500);
     Customer.find = originalFind;
   });
@@ -454,7 +454,7 @@ describe('Error handling (edge cases)', () => {
     Customer.findOne = jest.fn().mockRejectedValue(new Error('db down'));
 
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/api/customers/${fakeId}`);
+    const res = await request(app).get(`/customers/${fakeId}`);
     expect(res.status).toBe(500);
     Customer.findOne = originalFindOne;
   });
@@ -465,7 +465,7 @@ describe('Error handling (edge cases)', () => {
 
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .put(`/api/customers/${fakeId}`)
+      .put(`/customers/${fakeId}`)
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
@@ -475,12 +475,12 @@ describe('Error handling (edge cases)', () => {
 
   test('PUT returns 400 on validation error', async () => {
     const createRes = await request(app)
-      .post('/api/customers')
+      .post('/customers')
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
     const res = await request(app)
-      .put(`/api/customers/${createRes.body._id}`)
+      .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
       .send({ email: '' });
 
@@ -493,7 +493,7 @@ describe('Error handling (edge cases)', () => {
 
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .delete(`/api/customers/${fakeId}`)
+      .delete(`/customers/${fakeId}`)
       .set('x-user-id', 'deleter');
 
     expect(res.status).toBe(500);
@@ -505,7 +505,7 @@ describe('Error handling (edge cases)', () => {
     Customer.findById = jest.fn().mockRejectedValue(new Error('db down'));
 
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/api/customers/${fakeId}/history`);
+    const res = await request(app).get(`/customers/${fakeId}/history`);
     expect(res.status).toBe(500);
     Customer.findById = originalFindById;
   });

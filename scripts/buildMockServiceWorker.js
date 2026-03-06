@@ -234,8 +234,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   const path = url.pathname;
 
-  // Only intercept /api/ requests
-  if (!path.startsWith('/api/')) return;
+  // Only intercept /customers or /health requests
+  if (!path.includes('/customers') && !path.includes('/health')) return;
 
   // Handle CORS preflight
   if (event.request.method === 'OPTIONS') {
@@ -254,43 +254,43 @@ self.addEventListener('fetch', (event) => {
     const method = event.request.method;
 
     // Health check
-    if (path === '/api/health' || path === '/s14s-identify/api/health') {
+    if (path === '/health' || path === '/s14s-identify/health') {
       return jsonResponse({ status: 'ok' }, 200);
     }
 
     // Normalize path - strip base path if present
     const normalized = path.replace(/^\\/s14s-identify/, '');
 
-    // POST /api/customers
-    if (normalized === '/api/customers' && method === 'POST') {
+    // POST /customers
+    if (normalized === '/customers' && method === 'POST') {
       const body = await event.request.json();
       return handlePost(body, auditUser);
     }
 
-    // GET /api/customers
-    if (normalized === '/api/customers' && method === 'GET') {
+    // GET /customers
+    if (normalized === '/customers' && method === 'GET') {
       return handleGetAll(url);
     }
 
-    // GET /api/customers/:id/history
+    // GET /customers/:id/history
     const historyMatch = normalized.match(/^\\/api\\/customers\\/([a-f0-9]+)\\/history$/);
     if (historyMatch && method === 'GET') {
       return handleHistory(historyMatch[1]);
     }
 
-    // GET /api/customers/:id
+    // GET /customers/:id
     const idMatch = normalized.match(/^\\/api\\/customers\\/([a-f0-9]+)$/);
     if (idMatch && method === 'GET') {
       return handleGetOne(idMatch[1]);
     }
 
-    // PUT /api/customers/:id
+    // PUT /customers/:id
     if (idMatch && method === 'PUT') {
       const body = await event.request.json();
       return handlePut(idMatch[1], body, auditUser);
     }
 
-    // DELETE /api/customers/:id
+    // DELETE /customers/:id
     if (idMatch && method === 'DELETE') {
       return handleDelete(idMatch[1], auditUser);
     }
