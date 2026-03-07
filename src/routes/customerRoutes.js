@@ -599,6 +599,140 @@ router.put('/:id', async (req, res) => {
 /**
  * @swagger
  * /customers/{id}:
+ *   patch:
+ *     summary: Merge another customer into this one
+ *     description: >
+ *       Merges a source customer into the target customer identified by {id}.
+ *       The source customer's aliases are transferred to the target, the source
+ *       is soft-deleted, and its merged_into field is set to the target's ID.
+ *       Future GET requests for the source will return 301 redirecting to the target.
+ *       Both records receive audit trail entries documenting the merge.
+ *     tags: [Customers]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID of the target (surviving) customer
+ *       - in: header
+ *         name: x-user-id
+ *         schema:
+ *           type: string
+ *         description: User performing the action (used for audit trail)
+ *         example: 'admin-user'
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - merge
+ *             properties:
+ *               merge:
+ *                 type: string
+ *                 description: ID of the source customer to merge into the target
+ *                 example: '60d5f484f1a2c8b1f8e4e1a2'
+ *     responses:
+ *       200:
+ *         description: Merge completed successfully. Returns the updated target customer.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Customer'
+ *       400:
+ *         description: >
+ *           Invalid request — merge field is missing, target and source are the same,
+ *           or the source customer has already been merged.
+ *       404:
+ *         description: Target or source customer not found (or already soft-deleted)
+ */
+router.patch('/:id', async (req, res) => {
+  try {
+    const { merge: sourceId } = req.body;
+
+    if (!sourceId) {
+      return res.status(400).json({ error: 'merge field is required' });
+    }
+
+    if (req.params.id === sourceId) {
+      return res.status(400).json({ error: 'Cannot merge a customer into itself' });
+    }
+
+    const [target, source] = await Promise.all([
+      Customer.findOne({ _id: req.params.id, deleted_at: null }),
+      Customer.findOne({ _id: sourceId, deleted_at: null })
+    ]);
+
+    if (!target) {
+      return res.status(404).json({ error: 'Target customer not found' });
+    }
+    if (!source) {
+      return res.status(404).json({ error: 'Source customer not found' });
+    }
+    if (source.merged_into) {
+      return res.status(400).json({ error: 'Source customer has already been merged' });
+    }
+
+    const now = new Date();
+
+    // Transfer aliases from source to target
+    for (const alias of source.aliases) {
+      target.aliases.push(alias);
+    }
+
+    target.updated_by = req.audit_user;
+    target.updated_at = now;
+    target.change_history.push({
+      changed_by: req.audit_user,
+      changed_at: now,
+      delta: {
+        merge: {
+          action: 'merged',
+          source_id: source._id,
+          aliases_transferred: source.aliases.length
+        }
+      }
+    });
+
+    target.search_tokens = generateSearchTokens({
+      first_name: target.first_name,
+      last_name: target.last_name,
+      email: target.email,
+      phone: target.phone,
+      address: target.toObject().address
+    });
+
+    // Mark source as merged and soft-deleted
+    source.merged_into = target._id;
+    source.deleted_by = req.audit_user;
+    source.deleted_at = now;
+    source.change_history.push({
+      changed_by: req.audit_user,
+      changed_at: now,
+      delta: {
+        merge: {
+          action: 'merged_into',
+          target_id: target._id
+        }
+      }
+    });
+
+    await Promise.all([target.save(), source.save()]);
+
+    return res.status(200).json(shallowCustomerResponse(target));
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /customers/{id}:
  *   delete:
  *     summary: Soft delete a customer
  *     description: >

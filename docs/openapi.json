@@ -222,6 +222,67 @@
           }
         }
       },
+      "patch": {
+        "summary": "Merge another customer into this one",
+        "description": "Merges a source customer into the target customer identified by {id}. The source customer's aliases are transferred to the target, the source is soft-deleted, and its merged_into field is set to the target's ID. Future GET requests for the source will return 301 redirecting to the target. Both records receive audit trail entries documenting the merge.",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID of the target (surviving) customer"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "User performing the action"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["merge"],
+                "properties": {
+                  "merge": {
+                    "type": "string",
+                    "description": "ID of the source customer to merge into the target"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Merge completed — returns the updated target customer with transferred aliases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Customer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (missing merge field, self-merge, or source already merged)"
+          },
+          "404": {
+            "description": "Target or source customer not found"
+          }
+        }
+      },
       "delete": {
         "summary": "Soft delete a customer",
         "tags": [

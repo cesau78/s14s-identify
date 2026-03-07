@@ -449,6 +449,200 @@ describe('PUT /customers/:id', () => {
   });
 });
 
+describe('PATCH /customers/:id (merge)', () => {
+  test('merges source customer into target customer', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Jane',
+        email: 'jane@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    const res = await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
+
+    expect(res.status).toBe(200);
+    expect(res.body.aliases).toHaveLength(2);
+    expect(res.body.aliases[1].source_system).toBe('ERP');
+    expect(res.body.updated_by).toBe('merger');
+
+    // Source should be soft-deleted and merged
+    const sourceDb = await Customer.findById(sourceRes.body._id);
+    expect(sourceDb.deleted_at).toBeTruthy();
+    expect(sourceDb.merged_into.toString()).toBe(targetRes.body._id);
+  });
+
+  test('returns 301 when GETting merged source', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Jane',
+        email: 'jane@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
+
+    const getRes = await request(app).get(`/customers/${sourceRes.body._id}`);
+    expect(getRes.status).toBe(301);
+    expect(getRes.headers['location']).toContain(`/customers/${targetRes.body._id}`);
+  });
+
+  test('records merge in change history for both records', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Jane',
+        email: 'jane@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
+
+    const targetHistory = await request(app).get(`/customers/${targetRes.body._id}/history`);
+    expect(targetHistory.body).toHaveLength(1);
+    expect(targetHistory.body[0].delta.merge.action).toBe('merged');
+
+    const sourceDb = await Customer.findById(sourceRes.body._id);
+    expect(sourceDb.change_history).toHaveLength(1);
+    expect(sourceDb.change_history[0].delta.merge.action).toBe('merged_into');
+  });
+
+  test('returns 400 when merge field is missing', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/merge field is required/);
+  });
+
+  test('returns 400 when merging a customer into itself', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: targetRes.body._id });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/itself/);
+  });
+
+  test('returns 404 when target customer does not exist', async () => {
+    const fakeId = new mongoose.Types.ObjectId();
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .patch(`/customers/${fakeId}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/Target/);
+  });
+
+  test('returns 404 when source customer does not exist', async () => {
+    const fakeId = new mongoose.Types.ObjectId();
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: fakeId.toString() });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/Source/);
+  });
+
+  test('returns 404 for invalid ID format', async () => {
+    const res = await request(app)
+      .patch('/customers/invalid-id')
+      .set('x-user-id', 'merger')
+      .send({ merge: 'also-invalid' });
+
+    expect(res.status).toBe(404);
+  });
+
+  test('returns 404 when source is already soft-deleted', async () => {
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Jane',
+        email: 'jane@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    await request(app)
+      .delete(`/customers/${sourceRes.body._id}`)
+      .set('x-user-id', 'tester');
+
+    const res = await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/Source/);
+  });
+});
+
 describe('DELETE /customers/:id', () => {
   test('soft deletes a customer', async () => {
     const createRes = await request(app)
