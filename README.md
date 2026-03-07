@@ -314,6 +314,12 @@ Records are never physically removed. A `DELETE` request sets:
 
 Soft-deleted records are excluded from all queries by default. Use `?include_deleted=true` on the list endpoint to include them. The matching engine only considers active (non-deleted) records as candidates.
 
+## Record Merging
+
+When a customer record is merged into another (e.g., via manual administrative action), the deprecated record is soft-deleted and a `merged_into` pointer is set.
+
+Attempts to retrieve the deprecated record via `GET /customers/:id` will return **301 Moved Permanently** with a `Location` header pointing to the new master record. This ensures clients automatically update their references.
+
 ---
 
 ## Data Model
@@ -336,6 +342,7 @@ Soft-deleted records are excluded from all queries by default. Use `?include_del
 | `updated_at` | Date | Last modification timestamp |
 | `deleted_by` | String | User who soft-deleted the record |
 | `deleted_at` | Date | Soft-deletion timestamp |
+| `merged_into` | String | ID of the master record if this customer was merged |
 
 ### Alias
 
