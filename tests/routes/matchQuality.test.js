@@ -281,4 +281,134 @@ describe('GET /match-quality/feedback', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual([]);
   });
+
+  test('filters by resolved status', async () => {
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: new mongoose.Types.ObjectId(),
+      reported_by: 'reviewer',
+      resolved: false
+    }).save();
+
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: new mongoose.Types.ObjectId(),
+      reported_by: 'reviewer',
+      resolved: true,
+      resolved_at: new Date()
+    }).save();
+
+    const unresolved = await request(app).get('/match-quality/feedback?resolved=false');
+    expect(unresolved.status).toBe(200);
+    expect(unresolved.body).toHaveLength(1);
+    expect(unresolved.body[0].resolved).toBe(false);
+
+    const resolved = await request(app).get('/match-quality/feedback?resolved=true');
+    expect(resolved.status).toBe(200);
+    expect(resolved.body).toHaveLength(1);
+    expect(resolved.body[0].resolved).toBe(true);
+  });
+});
+
+describe('GET /customers?under_review=true', () => {
+  test('returns only customers with unresolved false positive feedback', async () => {
+    // Create two customers
+    const cust1Res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const cust2Res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        email: 'jane@example.com',
+        first_name: 'Jane',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    // Only flag cust1 with unresolved false positive
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: cust1Res.body._id,
+      alias_id: new mongoose.Types.ObjectId(),
+      original_confidence: 0.96,
+      reported_by: 'reviewer',
+      resolved: false
+    }).save();
+
+    const res = await request(app).get('/customers?under_review=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]._id).toBe(cust1Res.body._id);
+  });
+
+  test('orders by most recent feedback first', async () => {
+    const cust1Res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const cust2Res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        email: 'jane@example.com',
+        first_name: 'Jane',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    // Older feedback for cust1
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: cust1Res.body._id,
+      reported_by: 'reviewer',
+      reported_at: new Date('2025-01-01'),
+      resolved: false
+    }).save();
+
+    // Newer feedback for cust2
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: cust2Res.body._id,
+      reported_by: 'reviewer',
+      reported_at: new Date('2025-06-01'),
+      resolved: false
+    }).save();
+
+    const res = await request(app).get('/customers?under_review=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body[0]._id).toBe(cust2Res.body._id);
+    expect(res.body[1]._id).toBe(cust1Res.body._id);
+  });
+
+  test('excludes customers with only resolved feedback', async () => {
+    const custRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: custRes.body._id,
+      reported_by: 'reviewer',
+      resolved: true,
+      resolved_at: new Date()
+    }).save();
+
+    const res = await request(app).get('/customers?under_review=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(0);
+  });
+
+  test('returns empty array when no feedback exists', async () => {
+    const res = await request(app).get('/customers?under_review=true');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
 });

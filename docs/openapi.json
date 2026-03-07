@@ -73,6 +73,14 @@
         "parameters": [
           {
             "in": "query",
+            "name": "under_review",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "When true, returns only customers with unresolved false positive match feedback, ordered by most recent feedback first. Mutually exclusive with include_deleted."
+          },
+          {
+            "in": "query",
             "name": "include_deleted",
             "schema": {
               "type": "boolean"
@@ -525,7 +533,7 @@
     "/api/match-quality/feedback": {
       "get": {
         "summary": "List all match feedback records",
-        "description": "Returns all match feedback records, optionally filtered by type.",
+        "description": "Returns all match feedback records, optionally filtered by type and/or resolved status.",
         "tags": [
           "Match Quality"
         ],
@@ -538,6 +546,14 @@
               "enum": ["false_positive", "false_negative"]
             },
             "description": "Filter by feedback type"
+          },
+          {
+            "in": "query",
+            "name": "resolved",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Filter by resolved status (true or false)"
           }
         ],
         "responses": {

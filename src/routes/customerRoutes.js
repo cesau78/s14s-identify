@@ -355,9 +355,19 @@ router.post('/', async (req, res) => {
  *     description: >
  *       Returns all customers that have not been soft-deleted.
  *       Use the include_deleted query parameter to also include soft-deleted records.
+ *       Use under_review=true to return only customers with unresolved false positive
+ *       feedback, ordered by most recent feedback first.
  *       Results are paginated.
  *     tags: [Customers]
  *     parameters:
+ *       - in: query
+ *         name: under_review
+ *         schema:
+ *           type: boolean
+ *         description: >
+ *           When true, returns only customers that have unresolved false positive
+ *           match feedback. Results are ordered by most recent feedback first.
+ *           Mutually exclusive with include_deleted.
  *       - in: query
  *         name: include_deleted
  *         schema:
@@ -409,12 +419,42 @@ router.get('/', async (req, res) => {
     if (limit < 1) limit = 1;
 
     const skip = (page - 1) * limit;
-    const filter = req.query.include_deleted === 'true' ? {} : { deleted_at: null };
 
-    const [customers, total] = await Promise.all([
-      Customer.find(filter).skip(skip).limit(limit),
-      Customer.countDocuments(filter)
-    ]);
+    let customers, total;
+
+    if (req.query.under_review === 'true') {
+      // Find customers with unresolved false positive feedback, ordered by most recent feedback
+      const feedback = await MatchFeedback.find({
+        type: 'false_positive',
+        resolved: false
+      }).sort({ reported_at: -1 });
+
+      // Deduplicate customer IDs while preserving order
+      const seen = new Set();
+      const orderedCustomerIds = [];
+      for (const f of feedback) {
+        const id = f.customer_id.toString();
+        if (!seen.has(id)) {
+          seen.add(id);
+          orderedCustomerIds.push(f.customer_id);
+        }
+      }
+
+      total = orderedCustomerIds.length;
+      const pagedIds = orderedCustomerIds.slice(skip, skip + limit);
+
+      const fetched = await Customer.find({ _id: { $in: pagedIds } });
+      // Re-sort to match feedback order
+      const idOrder = new Map(pagedIds.map((id, i) => [id.toString(), i]));
+      customers = fetched.sort((a, b) => idOrder.get(a._id.toString()) - idOrder.get(b._id.toString()));
+    } else {
+      const filter = req.query.include_deleted === 'true' ? {} : { deleted_at: null };
+
+      [customers, total] = await Promise.all([
+        Customer.find(filter).skip(skip).limit(limit),
+        Customer.countDocuments(filter)
+      ]);
+    }
 
     res.set('X-Total-Count', total.toString());
     res.set('X-Page', page.toString());

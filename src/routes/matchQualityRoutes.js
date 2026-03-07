@@ -79,7 +79,8 @@ router.get('/tune', async (req, res) => {
  *   get:
  *     summary: List all match feedback records
  *     description: >
- *       Returns all match feedback records, optionally filtered by type.
+ *       Returns all match feedback records, optionally filtered by type and/or
+ *       resolved status.
  *     tags: [Match Quality]
  *     parameters:
  *       - in: query
@@ -88,6 +89,11 @@ router.get('/tune', async (req, res) => {
  *           type: string
  *           enum: [false_positive, false_negative]
  *         description: Filter by feedback type
+ *       - in: query
+ *         name: resolved
+ *         schema:
+ *           type: boolean
+ *         description: Filter by resolved status (true or false)
  *     responses:
  *       200:
  *         description: Array of match feedback records
@@ -103,6 +109,9 @@ router.get('/feedback', async (req, res) => {
     const filter = {};
     if (req.query.type) {
       filter.type = req.query.type;
+    }
+    if (req.query.resolved !== undefined) {
+      filter.resolved = req.query.resolved === 'true';
     }
     const feedback = await MatchFeedback.find(filter).sort({ reported_at: -1 });
     return res.status(200).json(feedback);
