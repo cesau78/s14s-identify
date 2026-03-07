@@ -1,5 +1,6 @@
 const express = require('express');
 const Customer = require('../models/customer');
+const MatchFeedback = require('../models/matchFeedback');
 const { findMatch } = require('../services/customerMatchingService');
 const { computeDelta, CUSTOMER_AUDITABLE_FIELDS } = require('../services/auditDelta');
 const { sanitizeCustomerInput, sanitizeCustomerUpdate } = require('../services/inputSanitizer');
@@ -737,7 +738,19 @@ router.patch('/:id', async (req, res) => {
       }
     });
 
-    await Promise.all([target.save(), source.save()]);
+    // Record false negative — the system failed to auto-match these records
+    const falseNegative = new MatchFeedback({
+      type: 'false_negative',
+      customer_id: target._id,
+      related_customer_id: source._id,
+      reported_by: req.audit_user,
+      reported_at: now,
+      resolved: true,
+      resolved_at: now,
+      notes: 'Auto-recorded: manual merge indicates missed auto-match'
+    });
+
+    await Promise.all([target.save(), source.save(), falseNegative.save()]);
 
     return res.status(200).json(customerResponse(target));
   } catch (error) {
@@ -849,6 +862,92 @@ router.get('/:id/aliases', async (req, res) => {
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /customers/{id}/aliases/{aliasId}/feedback:
+ *   post:
+ *     summary: Report a false positive match
+ *     description: >
+ *       Reports that a specific alias was incorrectly matched to this customer
+ *       (false positive). This feedback is used to compute F1 quality metrics
+ *       and to suggest adjustments to the matching algorithm weights.
+ *     tags: [Match Quality]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Customer ID
+ *       - in: path
+ *         name: aliasId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Alias ID to report as incorrectly matched
+ *       - in: header
+ *         name: x-user-id
+ *         schema:
+ *           type: string
+ *         description: User reporting the feedback
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notes:
+ *                 type: string
+ *                 description: Optional explanation of why this match was incorrect
+ *     responses:
+ *       201:
+ *         description: Feedback recorded
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MatchFeedback'
+ *       404:
+ *         description: Customer or alias not found
+ *       400:
+ *         description: Alias was not an auto-match (no match_confidence)
+ */
+router.post('/:id/aliases/:aliasId/feedback', async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.params.id);
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const alias = customer.aliases.id(req.params.aliasId);
+    if (!alias) {
+      return res.status(404).json({ error: 'Alias not found' });
+    }
+
+    if (alias.match_confidence === null) {
+      return res.status(400).json({ error: 'This alias was not an auto-match — no feedback applicable' });
+    }
+
+    const feedback = new MatchFeedback({
+      type: 'false_positive',
+      customer_id: customer._id,
+      alias_id: alias._id,
+      original_confidence: alias.match_confidence,
+      original_algorithm: alias.match_algorithm,
+      reported_by: req.audit_user,
+      reported_at: new Date(),
+      notes: (req.body && req.body.notes) || null
+    });
+
+    await feedback.save();
+    return res.status(201).json(feedback);
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(404).json({ error: 'Customer or alias not found' });
     }
     return res.status(500).json({ error: 'Internal server error' });
   }

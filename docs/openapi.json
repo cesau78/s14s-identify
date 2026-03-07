@@ -244,7 +244,7 @@
       },
       "patch": {
         "summary": "Merge another customer into this one",
-        "description": "Merges a source customer into the target customer identified by {id}. The source customer's aliases are transferred to the target, the source is soft-deleted, and its merged_into field is set to the target's ID. Future GET requests for the source will return 301 redirecting to the target. Both records receive audit trail entries documenting the merge.",
+        "description": "Merges a source customer into the target customer identified by {id}. The source customer's aliases are transferred to the target, the source is soft-deleted, and its merged_into field is set to the target's ID. Future GET requests for the source will return 301 redirecting to the target. Both records receive audit trail entries documenting the merge. A false_negative match feedback record is automatically created to feed the match quality system.",
         "tags": [
           "Customers"
         ],
@@ -373,6 +373,76 @@
         }
       }
     },
+    "/api/customers/{id}/aliases/{aliasId}/feedback": {
+      "post": {
+        "summary": "Report false positive on an auto-matched alias",
+        "description": "Records feedback that an auto-matched alias was incorrectly matched (false positive). Only valid for aliases that have a non-null match_confidence, indicating they were created by the probabilistic matching system.",
+        "tags": [
+          "Match Quality"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer ID"
+          },
+          {
+            "in": "path",
+            "name": "aliasId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Alias ID (must have non-null match_confidence)"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "User reporting the feedback"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "notes": {
+                    "type": "string",
+                    "description": "Optional notes explaining why this is a false positive"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Feedback recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchFeedback"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Alias is not an auto-match (match_confidence is null)"
+          },
+          "404": {
+            "description": "Customer or alias not found"
+          }
+        }
+      }
+    },
     "/api/customers/{id}/changes": {
       "get": {
         "summary": "Get change history for a customer",
@@ -406,6 +476,83 @@
           },
           "404": {
             "description": "Customer not found"
+          }
+        }
+      }
+    },
+    "/api/match-quality": {
+      "get": {
+        "summary": "Get match quality metrics (F1 score)",
+        "description": "Computes precision, recall, and F1 score based on match feedback. Precision measures how many auto-matches were correct. Recall measures how many true matches the system found automatically. F1 is the harmonic mean of precision and recall.",
+        "tags": [
+          "Match Quality"
+        ],
+        "responses": {
+          "200": {
+            "description": "Current match quality metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchQualityMetrics"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/match-quality/tune": {
+      "get": {
+        "summary": "Get suggested weight adjustments",
+        "description": "Analyzes match feedback to suggest adjustments to the Fellegi-Sunter field weights and match threshold. Returns current weights, suggested weights, and the rationale for the adjustment. Does not apply changes automatically — review the suggestions and update the configuration manually if appropriate.",
+        "tags": [
+          "Match Quality"
+        ],
+        "responses": {
+          "200": {
+            "description": "Suggested weight adjustments based on feedback analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TuningSuggestion"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/match-quality/feedback": {
+      "get": {
+        "summary": "List all match feedback records",
+        "description": "Returns all match feedback records, optionally filtered by type.",
+        "tags": [
+          "Match Quality"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "type": "string",
+              "enum": ["false_positive", "false_negative"]
+            },
+            "description": "Filter by feedback type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of match feedback records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MatchFeedback"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -444,6 +591,16 @@
           "source_key": {
             "type": "string",
             "description": "Primary key from the source system"
+          },
+          "match_confidence": {
+            "type": "number",
+            "nullable": true,
+            "description": "Probabilistic match confidence score (null for manually created aliases)"
+          },
+          "match_algorithm": {
+            "type": "string",
+            "nullable": true,
+            "description": "Algorithm used for matching (e.g. fellegi-sunter)"
           },
           "original_payload": {
             "type": "object",
@@ -590,8 +747,142 @@
             "description": "ID of the master record this customer was merged into"
           }
         }
+      },
+      "MatchFeedback": {
+        "type": "object",
+        "description": "A feedback record indicating a false positive or false negative match outcome.",
+        "properties": {
+          "_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["false_positive", "false_negative"],
+            "description": "Whether the feedback reports a false positive (incorrect auto-match) or false negative (missed match, detected via manual merge)"
+          },
+          "customer_id": {
+            "type": "string",
+            "description": "The customer record involved"
+          },
+          "related_customer_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "For false negatives, the other customer that should have matched"
+          },
+          "alias_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "For false positives, the alias that was incorrectly matched"
+          },
+          "original_confidence": {
+            "type": "number",
+            "nullable": true,
+            "description": "The match confidence score at the time of the original auto-match"
+          },
+          "original_algorithm": {
+            "type": "string",
+            "nullable": true,
+            "description": "The matching algorithm used (e.g. fellegi-sunter)"
+          },
+          "reported_by": {
+            "type": "string",
+            "description": "User who reported the feedback"
+          },
+          "reported_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved": {
+            "type": "boolean",
+            "description": "Whether this feedback has been resolved"
+          },
+          "resolved_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "notes": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional notes explaining the feedback"
+          }
+        }
+      },
+      "MatchQualityMetrics": {
+        "type": "object",
+        "description": "Precision, recall, and F1 score computed from match feedback.",
+        "properties": {
+          "total_auto_matches": {
+            "type": "integer",
+            "description": "Total number of aliases created by auto-matching"
+          },
+          "true_positives": {
+            "type": "integer",
+            "description": "Auto-matches not flagged as false positives"
+          },
+          "false_positives": {
+            "type": "integer",
+            "description": "Auto-matches flagged as incorrect"
+          },
+          "false_negatives": {
+            "type": "integer",
+            "description": "Missed matches detected via manual merges"
+          },
+          "precision": {
+            "type": "number",
+            "description": "TP / (TP + FP) — fraction of auto-matches that were correct"
+          },
+          "recall": {
+            "type": "number",
+            "description": "TP / (TP + FN) — fraction of true matches the system found"
+          },
+          "f1": {
+            "type": "number",
+            "description": "Harmonic mean of precision and recall (0 when either is 0)"
+          }
+        }
+      },
+      "TuningSuggestion": {
+        "type": "object",
+        "description": "Suggested adjustments to matching weights and threshold based on feedback analysis.",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["tighten", "loosen", "none"],
+            "description": "Recommended action: tighten (raise threshold), loosen (lower threshold), or none"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Explanation of why this action is suggested"
+          },
+          "current_weights": {
+            "type": "object",
+            "description": "Current Fellegi-Sunter field weights"
+          },
+          "suggested_weights": {
+            "type": "object",
+            "description": "Suggested adjusted field weights (only present when action is not none)"
+          },
+          "current_threshold": {
+            "type": "number",
+            "description": "Current match confidence threshold"
+          },
+          "suggested_threshold": {
+            "type": "number",
+            "description": "Suggested adjusted threshold (only present when action is not none)"
+          }
+        }
       }
     }
   },
-  "tags": []
+  "tags": [
+    {
+      "name": "Customers",
+      "description": "Customer identity management"
+    },
+    {
+      "name": "Match Quality",
+      "description": "F1 quality metrics, feedback, and tuning for the probabilistic matching system"
+    }
+  ]
 }
