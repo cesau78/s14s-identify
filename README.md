@@ -84,8 +84,7 @@ graph TD
     A[Start: POST /customers request] --> B{Sanitize Input & Validate};
     B -- Validation Fails --> C[Return 400 Bad Request];
     B -- Validation OK --> D[Generate Search Tokens];
-    D --> E[Query DB for Candidates
-    (using indexed search_tokens)];
+    D --> E[Query DB for Candidates];
     E --> F{Iterate through Candidates};
     F -- For each candidate --> G[Calculate Fellegi-Sunter Score];
     G --> F;
