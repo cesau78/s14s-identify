@@ -13,8 +13,12 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
   - [Jaro-Winkler Distance](#jaro-winkler-distance)
   - [Field Configuration](#field-configuration)
   - [Match Threshold](#match-threshold)
+- [Search Tokens and Candidate Blocking](#search-tokens-and-candidate-blocking)
+  - [Token Design](#token-design)
+  - [Double Metaphone](#double-metaphone)
 - [Input Sanitization](#input-sanitization)
   - [E.164 Phone Normalization](#e164-phone-normalization)
+  - [Address Standardization (USPS Pub 28)](#address-standardization-usps-pub-28)
 - [Audit Trail](#audit-trail)
 - [Soft Deletes](#soft-deletes)
 - [Data Model](#data-model)
@@ -29,8 +33,11 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
 # Install dependencies
 npm install
 
-# Start MongoDB locally (default: mongodb://localhost:27017/s14s-identify)
-mongod
+# Start MongoDB (via Docker)
+docker compose up -d
+
+# Seed 1000 sample customers
+npm run seed
 
 # Run the server
 npm start
@@ -124,6 +131,70 @@ The `email` field carries the most discriminating power due to its extreme m/u r
 The match threshold is set at **0.997** (99.7% confidence). This was chosen to minimize false positives — incorrectly merging two distinct people is far more damaging than creating a duplicate record that can be merged later.
 
 When both records have no overlapping data (all fields empty), the score is 0. Fields where both records are missing are skipped entirely — they neither help nor hurt the score.
+
+---
+
+## Search Tokens and Candidate Blocking
+
+Running Fellegi-Sunter against every record in the database doesn't scale. The standard solution in record linkage is **blocking** — narrowing the candidate set before scoring. S14S Identify uses phonetic search tokens stored directly on each customer document and backed by a MongoDB multikey index.
+
+When a new record arrives, the system generates tokens from the incoming data, queries for any existing customers sharing at least one token (`$in`), and only runs Fellegi-Sunter against those candidates. This means the matching engine touches a small fraction of the database regardless of total size.
+
+### Token Design
+
+Each customer stores a flat `search_tokens` array of prefixed strings:
+
+```
+["fn:JN", "fn:AN", "ln:SM0", "em:john", "ed:example.com", "ph:5309", "ph:8675309", "sn:123", "ss:MN", "zp:62701"]
+```
+
+Prefixes prevent cross-field collisions (e.g., a ZIP code matching a phone suffix). A single compound index on `{ search_tokens: 1, deleted_at: 1 }` handles all token lookups efficiently.
+
+| Field | Prefix | Token Logic |
+|-------|--------|-------------|
+| `first_name` | `fn:` | Double Metaphone primary + alternate (if different) |
+| `last_name` | `ln:` | Double Metaphone primary + alternate (if different) |
+| `email` | `em:`, `ed:` | Lowercased local part and domain |
+| `phone` | `ph:` | Last 4 digits and last 7 digits of E.164 number |
+| `address.street` | `sn:`, `ss:` | Street number (exact) + Double Metaphone of street name words |
+| `address.zip` | `zp:` | First 5 digits of ZIP code |
+
+Tokens use **any-match** semantics (`$in`) for maximum recall — a single shared token is enough to pull a candidate into the scoring pool. Fellegi-Sunter then handles precision by computing a rigorous probabilistic score across all fields.
+
+Street name tokenization skips common USPS suffix words (ST, AVE, BLVD), directionals (N, S, E, W), secondary unit designators (APT, STE), and single-character words, since these are too common to be discriminating.
+
+### Double Metaphone
+
+Phonetic tokens are generated using the [Double Metaphone](https://en.wikipedia.org/wiki/Metaphone#Double_Metaphone) algorithm, which encodes how a word *sounds* rather than how it's spelled. This enables matching across common name variations:
+
+| Name | Primary | Alternate |
+|------|---------|-----------|
+| Michael | MKL | MXL |
+| Smith | SM0 | XMT |
+| Schmidt | XMT | SMT |
+
+Double Metaphone produces two encodings — a primary and an alternate — to handle words with ambiguous pronunciation. Both are stored as tokens when they differ, maximizing recall. Notice how "Smith" and "Schmidt" share the code `XMT`, which means a search for either name will surface the other as a candidate.
+
+### Address Standardization (USPS Pub 28)
+
+Before token generation, all addresses are standardized according to [USPS Publication 28](https://pe.usps.com/text/pub28/welcome.htm), the postal addressing standard. This ensures consistent tokenization regardless of how the address was originally entered.
+
+| Input | Standardized |
+|-------|-------------|
+| `123 Main Street` | `123 Main ST` |
+| `North Oak Avenue` | `N Oak AVE` |
+| `456 Elm Boulevard Apartment 4` | `456 Elm BLVD APT 4` |
+| `789 Cedar Blvd.` | `789 Cedar BLVD` |
+
+The standardizer normalizes:
+
+- **Street suffixes** — "Street" to "ST", "Avenue" to "AVE", "Boulevard" to "BLVD", etc.
+- **Directionals** — "North" to "N", "Southwest" to "SW", etc.
+- **Secondary unit designators** — "Apartment" to "APT", "Suite" to "STE", etc.
+- **ZIP+4 formatting** — "627011234" to "62701-1234"
+- **Periods and extra whitespace** — "St." to "ST", multiple spaces collapsed
+
+Standardization is applied during input sanitization, so all stored addresses are already in canonical form.
 
 ---
 
@@ -226,9 +297,10 @@ Soft-deleted records are excluded from all queries by default. Use `?include_del
 | `last_name` | String | Required |
 | `email` | String | Required, stored lowercase |
 | `phone` | String | Stored in E.164 format |
-| `address` | Object | `{ street, city, state, zip }` — state is uppercased |
+| `address` | Object | `{ street, city, state, zip }` — USPS standardized |
 | `aliases` | Array | Cross-system identity links (see below) |
 | `change_history` | Array | Audit trail entries |
+| `search_tokens` | Array\<String\> | Phonetic/exact tokens for candidate blocking (not exposed in API responses) |
 | `created_by` | String | User who created the record |
 | `created_at` | Date | Creation timestamp |
 | `updated_by` | String | Last user to modify the record |
@@ -245,12 +317,15 @@ Soft-deleted records are excluded from all queries by default. Use `?include_del
 | `original_payload` | Mixed | Complete original POST body, preserved as-is |
 | `added_by` | String | User who linked this alias |
 | `added_at` | Date | When the alias was linked |
+| `match_confidence` | Number | Fellegi-Sunter score (0–1) when matched; null for record creation |
+| `match_algorithm` | String | Algorithm used (e.g., `fellegi-sunter`); null for record creation |
 
 ### Indexes
 
 - `deleted_at` — fast filtering for active/deleted records
 - `email` — candidate lookup during matching
 - `aliases.source_system + aliases.source_key` — compound index for source system lookups
+- `search_tokens + deleted_at` — compound multikey index for token-based candidate blocking
 
 ---
 
@@ -268,7 +343,7 @@ npm run build
 
 Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
 
-Current status: **143 tests, 100% coverage across all metrics.**
+Current status: **221 tests, 100% coverage across all metrics.**
 
 ---
 
@@ -283,24 +358,36 @@ src/
   middleware/
     auditContext.js                Extracts x-user-id header for audit tracking
   models/
+    alias.js                      Alias subdocument schema
+    changeRecord.js               Change record subdocument schema
     customer.js                   Mongoose schema and indexes
   routes/
     customerRoutes.js             REST endpoints with Swagger annotations
   services/
     auditDelta.js                 Field-level change delta computation
+    addressStandardizer.js        USPS Pub 28 address standardization
     customerMatchingService.js    Fellegi-Sunter probabilistic matching
     inputSanitizer.js             Input validation and E.164 normalization
+    searchTokenService.js         Double Metaphone token generation
   swagger/
     swaggerConfig.js              OpenAPI spec generation
+
+scripts/
+  seed.js                         Seed database with sample customers
 
 tests/
   database/connection.test.js
   middleware/auditContext.test.js
-  models/customer.test.js
+  models/
+    alias.test.js
+    changeRecord.test.js
+    customer.test.js
   routes/customerRoutes.test.js
   services/
+    addressStandardizer.test.js
     auditDelta.test.js
     customerMatchingService.test.js
     inputSanitizer.test.js
+    searchTokenService.test.js
   swagger/swaggerConfig.test.js
 ```

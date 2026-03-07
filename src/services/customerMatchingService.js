@@ -46,7 +46,7 @@ const FIELD_CONFIG = {
   }
 };
 
-const MATCH_THRESHOLD = 0.997;
+const MATCH_THRESHOLD = 0.95;
 
 function normalizeString(value) {
   if (!value) return '';
