@@ -4,7 +4,7 @@ const MatchFeedback = require('../models/matchFeedback');
 const { findMatch } = require('../services/customerMatchingService');
 const { computeDelta, CUSTOMER_AUDITABLE_FIELDS } = require('../services/auditDelta');
 const { sanitizeCustomerInput, sanitizeCustomerUpdate } = require('../services/inputSanitizer');
-const { generateSearchTokens } = require('../services/searchTokenService');
+const { generateSearchTokens, generateSearchQueryTokens } = require('../services/searchTokenService');
 
 const router = express.Router();
 
@@ -481,6 +481,68 @@ router.get('/', async (req, res) => {
     if (links.length > 0) {
       res.set('Link', links.join(', '));
     }
+
+    return res.status(200).json(customers.map(c => customerResponse(c)));
+  } catch (error) {
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /customers/search:
+ *   get:
+ *     summary: Typeahead search for customers by name
+ *     description: >
+ *       Prefix-based search across first and last names, optimized for typeahead
+ *       at scale (10M+ records). Requires at least 2 characters. Uses indexed
+ *       prefix tokens for O(log n) lookups — no collection scans.
+ *     tags: [Customers]
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         required: true
+ *         schema:
+ *           type: string
+ *           minLength: 2
+ *         description: >
+ *           Name prefix to search for (minimum 2 characters). Matches against
+ *           the beginning of first_name or last_name, case-insensitive.
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Maximum results to return (default 20, max 100)
+ *     responses:
+ *       200:
+ *         description: Array of matching customers
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Customer'
+ *       400:
+ *         description: Query too short (minimum 2 characters)
+ */
+router.get('/search', async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (q.length < 2) {
+      return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+    }
+
+    let limit = parseInt(req.query.limit, 10) || 20;
+    if (limit > 100) limit = 100;
+    if (limit < 1) limit = 1;
+
+    const queryTokens = generateSearchQueryTokens(q);
+
+    const customers = await Customer.find({
+      search_tokens: { $in: queryTokens },
+      deleted_at: null
+    }).limit(limit);
 
     return res.status(200).json(customers.map(c => customerResponse(c)));
   } catch (error) {

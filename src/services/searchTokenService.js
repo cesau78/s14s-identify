@@ -14,10 +14,22 @@ function phoneticTokens(value, prefix) {
   return tokens;
 }
 
+function prefixTokens(value, prefix, minLen = 2) {
+  if (!value) return [];
+  const lower = value.toLowerCase().trim();
+  const tokens = [];
+  for (let i = minLen; i <= lower.length; i++) {
+    tokens.push(`${prefix}${lower.slice(0, i)}`);
+  }
+  return tokens;
+}
+
 function nameTokens(firstName, lastName) {
   return [
     ...phoneticTokens(firstName, 'fn:'),
-    ...phoneticTokens(lastName, 'ln:')
+    ...phoneticTokens(lastName, 'ln:'),
+    ...prefixTokens(firstName, 'fp:'),
+    ...prefixTokens(lastName, 'lp:')
   ];
 }
 
@@ -87,12 +99,21 @@ function generateSearchTokens(data) {
   return [...new Set(tokens)];
 }
 
+function generateSearchQueryTokens(query) {
+  if (!query) return [];
+  const term = query.toLowerCase().trim();
+  if (term.length < 2) return [];
+  return [`fp:${term}`, `lp:${term}`];
+}
+
 module.exports = {
   generateSearchTokens,
+  generateSearchQueryTokens,
   nameTokens,
   emailTokens,
   phoneTokens,
   addressTokens,
   phoneticTokens,
+  prefixTokens,
   isNonNameWord
 };

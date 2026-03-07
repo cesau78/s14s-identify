@@ -970,3 +970,99 @@ describe('Error handling (edge cases)', () => {
     Customer.findById = originalFindById;
   });
 });
+
+describe('GET /customers/search', () => {
+  test('finds customer by first name prefix', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get('/customers/search?q=jo');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].first_name).toBe('John');
+  });
+
+  test('finds customer by last name prefix', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get('/customers/search?q=do');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].last_name).toBe('Doe');
+  });
+
+  test('is case-insensitive', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get('/customers/search?q=JO');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+
+  test('returns 400 for single character query', async () => {
+    const res = await request(app).get('/customers/search?q=j');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/at least 2/);
+  });
+
+  test('returns 400 for empty query', async () => {
+    const res = await request(app).get('/customers/search');
+    expect(res.status).toBe(400);
+  });
+
+  test('excludes soft-deleted customers', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    await request(app)
+      .delete(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'tester');
+
+    const res = await request(app).get('/customers/search?q=jo');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(0);
+  });
+
+  test('returns empty array for no matches', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get('/customers/search?q=xyz');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  test('respects limit parameter', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Joan',
+        email: 'joan@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    const res = await request(app).get('/customers/search?q=jo&limit=1');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+});

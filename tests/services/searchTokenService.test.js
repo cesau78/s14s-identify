@@ -1,10 +1,12 @@
 const {
   generateSearchTokens,
+  generateSearchQueryTokens,
   nameTokens,
   emailTokens,
   phoneTokens,
   addressTokens,
   phoneticTokens,
+  prefixTokens,
   isNonNameWord
 } = require('../../src/services/searchTokenService');
 
@@ -241,6 +243,66 @@ describe('Search Token Service', () => {
       expect(tokens).toContain('em:test');
       expect(tokens).toContain('ed:test.com');
       expect(tokens).toHaveLength(2);
+    });
+
+    test('includes prefix tokens for first and last name', () => {
+      const tokens = generateSearchTokens({
+        first_name: 'John',
+        last_name: 'Doe'
+      });
+      expect(tokens).toContain('fp:jo');
+      expect(tokens).toContain('fp:joh');
+      expect(tokens).toContain('fp:john');
+      expect(tokens).toContain('lp:do');
+      expect(tokens).toContain('lp:doe');
+    });
+  });
+
+  describe('prefixTokens', () => {
+    test('generates prefixes from min length to full length', () => {
+      const tokens = prefixTokens('John', 'fp:');
+      expect(tokens).toEqual(['fp:jo', 'fp:joh', 'fp:john']);
+    });
+
+    test('lowercases the value', () => {
+      const tokens = prefixTokens('JOHN', 'fp:');
+      expect(tokens).toEqual(['fp:jo', 'fp:joh', 'fp:john']);
+    });
+
+    test('returns empty for single character name', () => {
+      expect(prefixTokens('J', 'fp:')).toEqual([]);
+    });
+
+    test('returns empty for empty input', () => {
+      expect(prefixTokens('', 'fp:')).toEqual([]);
+      expect(prefixTokens(null, 'fp:')).toEqual([]);
+      expect(prefixTokens(undefined, 'fp:')).toEqual([]);
+    });
+
+    test('returns single token for 2-char name', () => {
+      const tokens = prefixTokens('Jo', 'fp:');
+      expect(tokens).toEqual(['fp:jo']);
+    });
+  });
+
+  describe('generateSearchQueryTokens', () => {
+    test('generates fp: and lp: tokens for a query', () => {
+      const tokens = generateSearchQueryTokens('jo');
+      expect(tokens).toEqual(['fp:jo', 'lp:jo']);
+    });
+
+    test('lowercases and trims the query', () => {
+      const tokens = generateSearchQueryTokens('  JO  ');
+      expect(tokens).toEqual(['fp:jo', 'lp:jo']);
+    });
+
+    test('returns empty for single character', () => {
+      expect(generateSearchQueryTokens('j')).toEqual([]);
+    });
+
+    test('returns empty for empty input', () => {
+      expect(generateSearchQueryTokens('')).toEqual([]);
+      expect(generateSearchQueryTokens(null)).toEqual([]);
     });
   });
 });
