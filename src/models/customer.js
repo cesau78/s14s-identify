@@ -21,7 +21,8 @@ const customerSchema = new mongoose.Schema({
   updated_at: { type: Date, default: null },
   deleted_by: { type: String, default: null },
   deleted_at: { type: Date, default: null },
-  search_tokens: [{ type: String }]
+  search_tokens: [{ type: String }],
+  merged_into: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null }
 }, {
   timestamps: false,
   versionKey: false

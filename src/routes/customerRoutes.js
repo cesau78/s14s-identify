@@ -465,10 +465,25 @@ router.get('/', async (req, res) => {
  */
 router.get('/:id', async (req, res) => {
   try {
-    const customer = await Customer.findOne({ _id: req.params.id, deleted_at: null });
+    // Retrieve record regardless of deletion status to check for merges
+    const customer = await Customer.findById(req.params.id);
+
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
+
+    if (customer.merged_into) {
+      return res.status(301).location(`/customers/${customer.merged_into}`).json({
+        error: 'Moved Permanently',
+        message: 'This record has been merged into another.',
+        target_id: customer.merged_into
+      });
+    }
+
+    if (customer.deleted_at) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
     return res.status(200).json(customer);
   } catch (error) {
     if (error.name === 'CastError') {

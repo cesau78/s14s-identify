@@ -285,6 +285,12 @@
               }
             }
           },
+          "301": {
+            "description": "Moved Permanently (Record Merged)",
+            "headers": {
+              "Location": { "schema": { "type": "string" }, "description": "URI of the new master record" }
+            }
+          },
           "404": {
             "description": "Customer not found"
           }
@@ -462,6 +468,10 @@
           "deleted_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "merged_into": {
+            "type": "string",
+            "description": "ID of the master record this customer was merged into"
           }
         }
       }

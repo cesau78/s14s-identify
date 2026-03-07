@@ -310,6 +310,28 @@ describe('GET /customers/:id', () => {
     const res = await request(app).get(`/customers/${createRes.body._id}`);
     expect(res.status).toBe(404);
   });
+
+  test('returns 301 for merged customer', async () => {
+    // 1. Create "loser" record
+    const loser = new Customer(validCustomerPayload);
+    await loser.save();
+
+    // 2. Create "winner" record
+    const winner = new Customer({ ...validCustomerPayload, first_name: 'Winner' });
+    await winner.save();
+
+    // 3. Manually simulate a merge (since we don't have a merge endpoint yet)
+    //    A merged record is typically soft-deleted AND points to the winner.
+    loser.deleted_at = new Date();
+    loser.merged_into = winner._id;
+    await loser.save();
+
+    // 4. Attempt to GET the loser
+    const res = await request(app).get(`/customers/${loser._id}`);
+
+    expect(res.status).toBe(301);
+    expect(res.headers['location']).toContain(`/customers/${winner._id}`);
+  });
 });
 
 describe('PUT /customers/:id', () => {
