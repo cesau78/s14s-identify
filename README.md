@@ -75,6 +75,35 @@ The `POST /customers` endpoint does not blindly create records. It runs every in
 
 This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically.
 
+### Logic Flow
+
+The following diagram illustrates the control flow for the `POST /customers` endpoint:
+
+```mermaid
+graph TD
+    A[Start: POST /customers request] --> B{Sanitize Input & Validate};
+    B -- Validation Fails --> C[Return 400 Bad Request];
+    B -- Validation OK --> D[Generate Search Tokens];
+    D --> E[Query DB for Candidates<br/>(using indexed search_tokens)];
+    E --> F{Iterate through Candidates};
+    F -- For each candidate --> G[Calculate Fellegi-Sunter Score];
+    G --> F;
+    F -- All candidates scored --> H{Best Score >= 0.997?};
+    H -- Yes --> I[Add Alias to Matched Record];
+    I --> K[Save Record & Audit Trail];
+    K --> L[Return 200 OK with Matched Customer];
+    H -- No --> J[Create New Customer Record];
+    J --> K;
+    L --> M[End];
+    C --> M;
+```
+
+1.  **Sanitization**: All incoming data is cleaned and validated.
+2.  **Token Generation**: Search tokens (phonetic, exact) are created from the sanitized data.
+3.  **Candidate Blocking**: The database is queried for records sharing at least one token. This is a highly efficient indexed operation (`O(log N)`).
+4.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
+5.  **Decision**: Based on the highest score, the system either links an alias to an existing record or creates a new one.
+
 ---
 
 ## Customer Matching
@@ -362,13 +391,13 @@ src/
     changeRecord.js               Change record subdocument schema
     customer.js                   Mongoose schema and indexes
   routes/
-    customerRoutes.js             REST endpoints with Swagger annotations
+    customerRoutes.js             REST endpoints `(List: O(N), ID-based: O(log N), Create/Match: O(log N + C))`
   services/
-    auditDelta.js                 Field-level change delta computation
-    addressStandardizer.js        USPS Pub 28 address standardization
-    customerMatchingService.js    Fellegi-Sunter probabilistic matching
-    inputSanitizer.js             Input validation and E.164 normalization
-    searchTokenService.js         Double Metaphone token generation
+    auditDelta.js                 Field-level change delta computation `(O(1))`
+    addressStandardizer.js        USPS Pub 28 address standardization `(O(L) per field)`
+    customerMatchingService.js    Fellegi-Sunter matching `(findMatch: O(log N + C), score: O(1))`
+    inputSanitizer.js             Input validation and E.164 normalization `(O(L) per field)`
+    searchTokenService.js         Double Metaphone token generation `(O(L) per field)`
   swagger/
     swaggerConfig.js              OpenAPI spec generation
 

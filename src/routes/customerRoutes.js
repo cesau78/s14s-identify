@@ -347,6 +347,7 @@ router.post('/', async (req, res) => {
  *     description: >
  *       Returns all customers that have not been soft-deleted.
  *       Use the include_deleted query parameter to also include soft-deleted records.
+ *       Results are paginated.
  *     tags: [Customers]
  *     parameters:
  *       - in: query
@@ -354,9 +355,34 @@ router.post('/', async (req, res) => {
  *         schema:
  *           type: boolean
  *         description: Set to "true" to include soft-deleted customers in the results
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (default 1)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *         description: Items per page (default 100, max 1000)
  *     responses:
  *       200:
  *         description: Array of customers (excludes change_history for brevity)
+ *         headers:
+ *           X-Total-Count:
+ *             description: Total number of records matching criteria
+ *             schema:
+ *               type: integer
+ *           X-Page:
+ *             description: Current page
+ *             schema:
+ *               type: integer
+ *           X-Limit:
+ *             description: Current limit
+ *             schema:
+ *               type: integer
  *         content:
  *           application/json:
  *             schema:
@@ -366,8 +392,48 @@ router.post('/', async (req, res) => {
  */
 router.get('/', async (req, res) => {
   try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const defaultLimit = parseInt(process.env.DEFAULT_PAGE_SIZE, 10) || 100;
+    const maxLimit = parseInt(process.env.MAX_PAGE_SIZE, 10) || 1000;
+
+    let limit = parseInt(req.query.limit, 10) || defaultLimit;
+    if (limit > maxLimit) limit = maxLimit;
+    if (limit < 1) limit = 1;
+
+    const skip = (page - 1) * limit;
     const filter = req.query.include_deleted === 'true' ? {} : { deleted_at: null };
-    const customers = await Customer.find(filter);
+
+    const [customers, total] = await Promise.all([
+      Customer.find(filter).skip(skip).limit(limit),
+      Customer.countDocuments(filter)
+    ]);
+
+    res.set('X-Total-Count', total.toString());
+    res.set('X-Page', page.toString());
+    res.set('X-Limit', limit.toString());
+
+    const lastPage = Math.ceil(total / limit) || 1;
+    const links = [];
+    const generateUrl = (p) => {
+      const params = new URLSearchParams(req.query);
+      params.set('page', p);
+      params.set('limit', limit);
+      return `${req.protocol}://${req.get('host')}${req.baseUrl}?${params.toString()}`;
+    };
+
+    if (page < lastPage) {
+      links.push(`<${generateUrl(page + 1)}>; rel="next"`);
+    }
+    if (page > 1) {
+      links.push(`<${generateUrl(page - 1)}>; rel="prev"`);
+    }
+    links.push(`<${generateUrl(1)}>; rel="first"`);
+    links.push(`<${generateUrl(lastPage)}>; rel="last"`);
+
+    if (links.length > 0) {
+      res.set('Link', links.join(', '));
+    }
+
     return res.status(200).json(customers.map(shallowCustomerResponse));
   } catch (error) {
     return res.status(500).json({ error: 'Internal server error' });

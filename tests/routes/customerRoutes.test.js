@@ -216,6 +216,63 @@ describe('GET /customers', () => {
     const res = await request(app).get('/customers?include_deleted=true');
     expect(res.body).toHaveLength(1);
   });
+
+  test('paginates results', async () => {
+    // Create 15 customers
+    const customers = [];
+    for (let i = 0; i < 15; i++) {
+      customers.push({
+        ...validCustomerPayload,
+        email: `user${i}@example.com`,
+        first_name: `User${i}`
+      });
+    }
+    await Customer.insertMany(customers);
+
+    // Get page 1, limit 10
+    const res1 = await request(app).get('/customers?page=1&limit=10');
+    expect(res1.status).toBe(200);
+    expect(res1.body).toHaveLength(10);
+    expect(res1.headers['x-total-count']).toBe('15');
+    expect(res1.headers['x-page']).toBe('1');
+
+    // Get page 2, limit 10
+    const res2 = await request(app).get('/customers?page=2&limit=10');
+    expect(res2.status).toBe(200);
+    expect(res2.body).toHaveLength(5);
+    expect(res2.headers['x-page']).toBe('2');
+  });
+
+  test('enforces max page size', async () => {
+    const originalMax = process.env.MAX_PAGE_SIZE;
+    process.env.MAX_PAGE_SIZE = '5';
+
+    const res = await request(app).get('/customers?limit=100');
+    expect(res.headers['x-limit']).toBe('5');
+
+    if (originalMax) process.env.MAX_PAGE_SIZE = originalMax;
+    else delete process.env.MAX_PAGE_SIZE;
+  });
+
+  test('returns Link header for pagination', async () => {
+    // Create 15 customers
+    const customers = [];
+    for (let i = 0; i < 15; i++) {
+      customers.push({
+        ...validCustomerPayload,
+        email: `user${i}@example.com`,
+        first_name: `User${i}`
+      });
+    }
+    await Customer.insertMany(customers);
+
+    const res = await request(app).get('/customers?page=1&limit=10');
+    expect(res.headers['link']).toBeDefined();
+    expect(res.headers['link']).toContain('rel="next"');
+    expect(res.headers['link']).toContain('rel="last"');
+    expect(res.headers['link']).toContain('rel="first"');
+    expect(res.headers['link']).not.toContain('rel="prev"');
+  });
 });
 
 describe('GET /customers/:id', () => {

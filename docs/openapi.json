@@ -78,11 +78,55 @@
               "type": "boolean"
             },
             "description": "Include soft-deleted customers"
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "Page number (default 1)"
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            },
+            "description": "Items per page (default 100, max 1000)"
           }
         ],
         "responses": {
           "200": {
             "description": "Array of customers",
+            "headers": {
+              "X-Total-Count": {
+                "description": "Total number of records matching criteria",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Page": {
+                "description": "Current page",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Limit": {
+                "description": "Current limit",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "Link": {
+                "description": "Pagination links (RFC 5988)",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
