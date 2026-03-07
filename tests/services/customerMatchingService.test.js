@@ -201,6 +201,9 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
       const result = await findMatch(mockModel, incoming);
       expect(result.match).toBe(existingCustomer);
       expect(result.confidence).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+      expect(mockModel.find).toHaveBeenCalledWith(
+        expect.objectContaining({ search_tokens: { $in: expect.any(Array) }, deleted_at: null })
+      );
     });
 
     test('returns null match when score < threshold', async () => {
@@ -232,6 +235,15 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
       const result = await findMatch(mockModel, { first_name: 'John', last_name: 'Doe', email: 'john@example.com' });
       expect(result.match).toBeNull();
       expect(result.confidence).toBe(0);
+    });
+
+    test('skips query when no tokens can be generated', async () => {
+      const mockModel = { find: jest.fn().mockResolvedValue([]) };
+
+      const result = await findMatch(mockModel, {});
+      expect(result.match).toBeNull();
+      expect(result.confidence).toBe(0);
+      expect(mockModel.find).not.toHaveBeenCalled();
     });
 
     test('selects the best match from multiple candidates', async () => {

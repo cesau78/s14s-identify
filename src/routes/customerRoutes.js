@@ -3,6 +3,7 @@ const Customer = require('../models/customer');
 const { findMatch } = require('../services/customerMatchingService');
 const { computeDelta, CUSTOMER_AUDITABLE_FIELDS } = require('../services/auditDelta');
 const { sanitizeCustomerInput, sanitizeCustomerUpdate } = require('../services/inputSanitizer');
+const { generateSearchTokens } = require('../services/searchTokenService');
 
 const router = express.Router();
 
@@ -324,7 +325,8 @@ router.post('/', async (req, res) => {
       }],
       change_history: [],
       created_by: req.audit_user,
-      created_at: now
+      created_at: now,
+      search_tokens: generateSearchTokens(customerFields)
     });
 
     await customer.save();
@@ -491,6 +493,14 @@ router.put('/:id', async (req, res) => {
 
     customer.updated_by = req.audit_user;
     customer.updated_at = new Date();
+
+    customer.search_tokens = generateSearchTokens({
+      first_name: customer.first_name,
+      last_name: customer.last_name,
+      email: customer.email,
+      phone: customer.phone,
+      address: customer.toObject().address
+    });
 
     await customer.save();
     return res.status(200).json(shallowCustomerResponse(customer));

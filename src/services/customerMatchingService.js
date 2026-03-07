@@ -1,4 +1,5 @@
 const jaroWinkler = require('jaro-winkler');
+const { generateSearchTokens } = require('./searchTokenService');
 
 // Fellegi-Sunter probabilistic record linkage
 //
@@ -120,7 +121,11 @@ function calculateFellegiSunterScore(incoming, existing) {
 }
 
 async function findMatch(Customer, incomingData) {
-  const candidates = await Customer.find({ deleted_at: null });
+  const tokens = generateSearchTokens(incomingData);
+
+  const candidates = tokens.length > 0
+    ? await Customer.find({ search_tokens: { $in: tokens }, deleted_at: null })
+    : [];
 
   let bestMatch = null;
   let bestConfidence = 0;

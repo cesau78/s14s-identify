@@ -1,4 +1,5 @@
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
+const { standardizeAddress } = require('./addressStandardizer');
 
 function sanitizeString(value) {
   if (value === null || value === undefined) return '';
@@ -26,12 +27,12 @@ function normalizePhoneToE164(value, defaultCountry) {
 function sanitizeAddress(address) {
   if (!address || typeof address !== 'object') return {};
 
-  const result = {};
-  if (address.street !== undefined) result.street = sanitizeString(address.street);
-  if (address.city !== undefined) result.city = sanitizeString(address.city);
-  if (address.state !== undefined) result.state = sanitizeString(address.state).toUpperCase();
-  if (address.zip !== undefined) result.zip = sanitizeString(address.zip);
-  return result;
+  const trimmed = {};
+  if (address.street !== undefined) trimmed.street = sanitizeString(address.street);
+  if (address.city !== undefined) trimmed.city = sanitizeString(address.city);
+  if (address.state !== undefined) trimmed.state = sanitizeString(address.state).toUpperCase();
+  if (address.zip !== undefined) trimmed.zip = sanitizeString(address.zip);
+  return standardizeAddress(trimmed);
 }
 
 function sanitizeCustomerInput(body) {

@@ -20,7 +20,8 @@ const customerSchema = new mongoose.Schema({
   updated_by: { type: String, default: null },
   updated_at: { type: Date, default: null },
   deleted_by: { type: String, default: null },
-  deleted_at: { type: Date, default: null }
+  deleted_at: { type: Date, default: null },
+  search_tokens: [{ type: String }]
 }, {
   timestamps: false,
   versionKey: false
@@ -29,6 +30,7 @@ const customerSchema = new mongoose.Schema({
 customerSchema.index({ deleted_at: 1 });
 customerSchema.index({ email: 1 });
 customerSchema.index({ 'aliases.source_system': 1, 'aliases.source_key': 1 });
+customerSchema.index({ search_tokens: 1, deleted_at: 1 });
 
 const Customer = mongoose.model('Customer', customerSchema);
 

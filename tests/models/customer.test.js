@@ -103,4 +103,18 @@ describe('Customer Model', () => {
     expect(customer.address.state).toBe('');
     expect(customer.address.zip).toBe('');
   });
+
+  test('stores search_tokens as array of strings', async () => {
+    const customer = await Customer.create({
+      ...validCustomerData,
+      search_tokens: ['fn:JN', 'ln:T', 'em:john', 'ed:example.com']
+    });
+    expect(customer.search_tokens).toHaveLength(4);
+    expect(customer.search_tokens).toContain('fn:JN');
+  });
+
+  test('defaults search_tokens to empty array', async () => {
+    const customer = await Customer.create(validCustomerData);
+    expect(customer.search_tokens).toEqual([]);
+  });
 });

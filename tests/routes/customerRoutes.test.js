@@ -128,6 +128,22 @@ describe('POST /customers', () => {
     expect(res.body.phone).toBe('+12145551234');
   });
 
+  test('stores search_tokens in DB but excludes from response', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    expect(res.status).toBe(201);
+    expect(res.body.search_tokens).toBeUndefined();
+
+    const dbRecord = await Customer.findById(res.body._id);
+    expect(dbRecord.search_tokens.length).toBeGreaterThan(0);
+    expect(dbRecord.search_tokens.some(t => t.startsWith('fn:'))).toBe(true);
+    expect(dbRecord.search_tokens.some(t => t.startsWith('ln:'))).toBe(true);
+    expect(dbRecord.search_tokens.some(t => t.startsWith('em:'))).toBe(true);
+  });
+
   test('defaults audit_user to anonymous when no header', async () => {
     const res = await request(app)
       .post('/customers')
@@ -269,6 +285,8 @@ describe('PUT /customers/:id', () => {
       .set('x-user-id', 'creator')
       .send(validCustomerPayload);
 
+    const originalTokens = (await Customer.findById(createRes.body._id)).search_tokens;
+
     const res = await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
@@ -277,6 +295,9 @@ describe('PUT /customers/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.last_name).toBe('Smith');
     expect(res.body.phone).toBe('+14698887777');
+
+    const updatedTokens = (await Customer.findById(createRes.body._id)).search_tokens;
+    expect(updatedTokens).not.toEqual(originalTokens);
   });
 
   test('updates address fields', async () => {
@@ -291,7 +312,7 @@ describe('PUT /customers/:id', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.address.city).toBe('Chicago');
-    expect(res.body.address.street).toBe('123 Main St');
+    expect(res.body.address.street).toBe('123 Main ST');
   });
 
   test('records no delta when nothing changed', async () => {
