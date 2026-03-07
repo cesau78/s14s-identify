@@ -100,7 +100,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Array of customers",
+            "description": "Array of customers (excludes aliases and changes by default)",
             "headers": {
               "X-Total-Count": {
                 "description": "Total number of records matching criteria",
@@ -144,6 +144,7 @@
     "/api/customers/{id}": {
       "get": {
         "summary": "Get a customer by ID",
+        "description": "Returns a single customer record. By default, aliases and changes are excluded. Use the show query parameter to include them.",
         "tags": [
           "Customers"
         ],
@@ -155,6 +156,14 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "show",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated list of child resources to include. Valid values: aliases, changes. Example: ?show=aliases,changes"
           }
         ],
         "responses": {
@@ -165,6 +174,17 @@
                 "schema": {
                   "$ref": "#/components/schemas/Customer"
                 }
+              }
+            }
+          },
+          "301": {
+            "description": "Moved Permanently — this record was merged into another customer",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "URI of the target customer record"
               }
             }
           },
@@ -266,7 +286,7 @@
         },
         "responses": {
           "200": {
-            "description": "Merge completed — returns the updated target customer with transferred aliases",
+            "description": "Merge completed — returns the updated target customer",
             "content": {
               "application/json": {
                 "schema": {
@@ -316,9 +336,10 @@
         }
       }
     },
-    "/api/customers/{id}/history": {
+    "/api/customers/{id}/aliases": {
       "get": {
-        "summary": "Get change history for a customer",
+        "summary": "Get aliases for a customer",
+        "description": "Returns all cross-system identity links for a customer. Available even for soft-deleted customers.",
         "tags": [
           "Customers"
         ],
@@ -334,7 +355,44 @@
         ],
         "responses": {
           "200": {
-            "description": "Change history array",
+            "description": "Array of aliases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Alias"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer not found"
+          }
+        }
+      }
+    },
+    "/api/customers/{id}/changes": {
+      "get": {
+        "summary": "Get change history for a customer",
+        "description": "Returns the full audit trail for a customer, including field-level deltas for every update, alias additions, merges, and soft-deletion events. Available even for soft-deleted customers.",
+        "tags": [
+          "Customers"
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chronological array of change records",
             "content": {
               "application/json": {
                 "schema": {
@@ -344,12 +402,6 @@
                   }
                 }
               }
-            }
-          },
-          "301": {
-            "description": "Moved Permanently (Record Merged)",
-            "headers": {
-              "Location": { "schema": { "type": "string" }, "description": "URI of the new master record" }
             }
           },
           "404": {
@@ -478,6 +530,7 @@
       },
       "Customer": {
         "type": "object",
+        "description": "The canonical customer record. By default, aliases and changes are not included. Use ?show=aliases,changes on GET /customers/{id} or the dedicated child resource endpoints to retrieve them.",
         "properties": {
           "_id": {
             "type": "string"
@@ -499,12 +552,14 @@
           },
           "aliases": {
             "type": "array",
+            "description": "Only included when requested via ?show=aliases",
             "items": {
               "$ref": "#/components/schemas/Alias"
             }
           },
-          "change_history": {
+          "changes": {
             "type": "array",
+            "description": "Only included when requested via ?show=changes",
             "items": {
               "$ref": "#/components/schemas/ChangeRecord"
             }

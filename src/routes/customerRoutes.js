@@ -7,15 +7,14 @@ const { generateSearchTokens } = require('../services/searchTokenService');
 
 const router = express.Router();
 
-function shallowCustomerResponse(customer) {
-  return {
+function customerResponse(customer, show = []) {
+  const response = {
     _id: customer._id,
     first_name: customer.first_name,
     last_name: customer.last_name,
     email: customer.email,
     phone: customer.phone,
     address: customer.address,
-    aliases: customer.aliases,
     created_by: customer.created_by,
     created_at: customer.created_at,
     updated_by: customer.updated_by,
@@ -23,6 +22,14 @@ function shallowCustomerResponse(customer) {
     deleted_by: customer.deleted_by,
     deleted_at: customer.deleted_at
   };
+  if (show.includes('aliases')) response.aliases = customer.aliases;
+  if (show.includes('changes')) response.changes = customer.change_history;
+  return response;
+}
+
+function parseShow(query) {
+  if (!query.show) return [];
+  return query.show.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 /**
@@ -308,7 +315,7 @@ router.post('/', async (req, res) => {
       });
 
       await match.save();
-      return res.status(200).json(shallowCustomerResponse(match));
+      return res.status(200).json(customerResponse(match));
     }
 
     const now = new Date();
@@ -330,7 +337,7 @@ router.post('/', async (req, res) => {
     });
 
     await customer.save();
-    return res.status(201).json(shallowCustomerResponse(customer));
+    return res.status(201).json(customerResponse(customer));
   } catch (error) {
     if (error.name === 'ValidationError') {
       return res.status(400).json({ errors: [error.message] });
@@ -434,7 +441,7 @@ router.get('/', async (req, res) => {
       res.set('Link', links.join(', '));
     }
 
-    return res.status(200).json(customers.map(shallowCustomerResponse));
+    return res.status(200).json(customers.map(c => customerResponse(c)));
   } catch (error) {
     return res.status(500).json({ error: 'Internal server error' });
   }
@@ -445,7 +452,10 @@ router.get('/', async (req, res) => {
  * /customers/{id}:
  *   get:
  *     summary: Get a customer by ID
- *     description: Returns a single customer record. Soft-deleted customers are not returned.
+ *     description: >
+ *       Returns a single customer record. Soft-deleted customers are not returned.
+ *       By default, aliases and changes are excluded. Use the show query parameter
+ *       to include them (e.g. ?show=aliases,changes).
  *     tags: [Customers]
  *     parameters:
  *       - in: path
@@ -453,6 +463,13 @@ router.get('/', async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: show
+ *         schema:
+ *           type: string
+ *         description: >
+ *           Comma-separated list of child resources to include in the response.
+ *           Valid values: aliases, changes. Example: ?show=aliases,changes
  *     responses:
  *       200:
  *         description: Customer found
@@ -484,7 +501,8 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    return res.status(200).json(customer);
+    const show = parseShow(req.query);
+    return res.status(200).json(customerResponse(customer, show));
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });
@@ -584,7 +602,7 @@ router.put('/:id', async (req, res) => {
     });
 
     await customer.save();
-    return res.status(200).json(shallowCustomerResponse(customer));
+    return res.status(200).json(customerResponse(customer));
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });
@@ -721,7 +739,7 @@ router.patch('/:id', async (req, res) => {
 
     await Promise.all([target.save(), source.save()]);
 
-    return res.status(200).json(shallowCustomerResponse(target));
+    return res.status(200).json(customerResponse(target));
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });
@@ -796,7 +814,49 @@ router.delete('/:id', async (req, res) => {
 
 /**
  * @swagger
- * /customers/{id}/history:
+ * /customers/{id}/aliases:
+ *   get:
+ *     summary: Get aliases for a customer
+ *     description: >
+ *       Returns all cross-system identity links for a customer.
+ *       Available even for soft-deleted customers.
+ *     tags: [Customers]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Array of aliases
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Alias'
+ *       404:
+ *         description: Customer not found
+ */
+router.get('/:id/aliases', async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.params.id);
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    return res.status(200).json(customer.aliases);
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /customers/{id}/changes:
  *   get:
  *     summary: Get change history for a customer
  *     description: >
@@ -822,7 +882,7 @@ router.delete('/:id', async (req, res) => {
  *       404:
  *         description: Customer not found
  */
-router.get('/:id/history', async (req, res) => {
+router.get('/:id/changes', async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id);
     if (!customer) {

@@ -40,15 +40,11 @@ describe('POST /customers', () => {
     expect(res.status).toBe(201);
     expect(res.body.first_name).toBe('John');
     expect(res.body.last_name).toBe('Doe');
-    expect(res.body.aliases).toHaveLength(1);
-    expect(res.body.aliases[0].source_system).toBe('CRM');
-    expect(res.body.aliases[0].source_key).toBe('CRM-001');
-    expect(res.body.aliases[0].match_confidence).toBeNull();
-    expect(res.body.aliases[0].match_algorithm).toBeNull();
+    expect(res.body.aliases).toBeUndefined();
     expect(res.body.created_by).toBe('tester');
   });
 
-  test('matches existing customer and returns 200 with alias added', async () => {
+  test('matches existing customer and returns 200', async () => {
     await request(app)
       .post('/customers')
       .set('x-user-id', 'tester')
@@ -64,11 +60,15 @@ describe('POST /customers', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.aliases).toHaveLength(2);
-    expect(res.body.aliases[1].source_system).toBe('ERP');
-    expect(res.body.aliases[1].match_confidence).toBeGreaterThanOrEqual(0.997);
-    expect(res.body.aliases[1].match_algorithm).toBe('fellegi-sunter');
+    expect(res.body.aliases).toBeUndefined();
     expect(res.body.updated_by).toBe('tester-2');
+
+    // Verify aliases were added via child resource
+    const aliasRes = await request(app).get(`/customers/${res.body._id}/aliases`);
+    expect(aliasRes.body).toHaveLength(2);
+    expect(aliasRes.body[1].source_system).toBe('ERP');
+    expect(aliasRes.body[1].match_confidence).toBeGreaterThanOrEqual(0.997);
+    expect(aliasRes.body[1].match_algorithm).toBe('fellegi-sunter');
   });
 
   test('returns 400 when source_system is missing', async () => {
@@ -179,7 +179,7 @@ describe('GET /customers', () => {
     expect(res.body).toEqual([]);
   });
 
-  test('returns active customers', async () => {
+  test('returns active customers without aliases or changes', async () => {
     await request(app)
       .post('/customers')
       .send(validCustomerPayload);
@@ -187,6 +187,8 @@ describe('GET /customers', () => {
     const res = await request(app).get('/customers');
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
+    expect(res.body[0].aliases).toBeUndefined();
+    expect(res.body[0].changes).toBeUndefined();
   });
 
   test('excludes soft-deleted customers by default', async () => {
@@ -276,7 +278,7 @@ describe('GET /customers', () => {
 });
 
 describe('GET /customers/:id', () => {
-  test('returns a customer by ID', async () => {
+  test('returns a customer by ID without aliases or changes', async () => {
     const createRes = await request(app)
       .post('/customers')
       .send(validCustomerPayload);
@@ -284,6 +286,56 @@ describe('GET /customers/:id', () => {
     const res = await request(app).get(`/customers/${createRes.body._id}`);
     expect(res.status).toBe(200);
     expect(res.body.first_name).toBe('John');
+    expect(res.body.aliases).toBeUndefined();
+    expect(res.body.changes).toBeUndefined();
+  });
+
+  test('includes aliases when show=aliases', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get(`/customers/${createRes.body._id}?show=aliases`);
+    expect(res.status).toBe(200);
+    expect(res.body.aliases).toHaveLength(1);
+    expect(res.body.aliases[0].source_system).toBe('CRM');
+    expect(res.body.changes).toBeUndefined();
+  });
+
+  test('includes changes when show=changes', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'creator')
+      .send(validCustomerPayload);
+
+    await request(app)
+      .put(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'updater')
+      .send({ first_name: 'Jane' });
+
+    const res = await request(app).get(`/customers/${createRes.body._id}?show=changes`);
+    expect(res.status).toBe(200);
+    expect(res.body.changes).toHaveLength(1);
+    expect(res.body.changes[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
+    expect(res.body.aliases).toBeUndefined();
+  });
+
+  test('includes both when show=aliases,changes', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'creator')
+      .send(validCustomerPayload);
+
+    await request(app)
+      .put(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'updater')
+      .send({ first_name: 'Jane' });
+
+    const res = await request(app).get(`/customers/${createRes.body._id}?show=aliases,changes`);
+    expect(res.status).toBe(200);
+    expect(res.body.aliases).toHaveLength(1);
+    expect(res.body.changes).toHaveLength(1);
   });
 
   test('returns 404 for non-existent ID', async () => {
@@ -312,25 +364,30 @@ describe('GET /customers/:id', () => {
   });
 
   test('returns 301 for merged customer', async () => {
-    // 1. Create "loser" record
-    const loser = new Customer(validCustomerPayload);
-    await loser.save();
+    const targetRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
 
-    // 2. Create "winner" record
-    const winner = new Customer({ ...validCustomerPayload, first_name: 'Winner' });
-    await winner.save();
+    const sourceRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Jane',
+        email: 'jane@example.com',
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
 
-    // 3. Manually simulate a merge (since we don't have a merge endpoint yet)
-    //    A merged record is typically soft-deleted AND points to the winner.
-    loser.deleted_at = new Date();
-    loser.merged_into = winner._id;
-    await loser.save();
+    await request(app)
+      .patch(`/customers/${targetRes.body._id}`)
+      .set('x-user-id', 'merger')
+      .send({ merge: sourceRes.body._id });
 
-    // 4. Attempt to GET the loser
-    const res = await request(app).get(`/customers/${loser._id}`);
-
+    const res = await request(app).get(`/customers/${sourceRes.body._id}`);
     expect(res.status).toBe(301);
-    expect(res.headers['location']).toContain(`/customers/${winner._id}`);
+    expect(res.headers['location']).toContain(`/customers/${targetRes.body._id}`);
   });
 });
 
@@ -352,10 +409,10 @@ describe('PUT /customers/:id', () => {
     expect(res.body.updated_by).toBe('updater');
     expect(res.body.updated_at).toBeTruthy();
 
-    const historyRes = await request(app).get(`/customers/${createRes.body._id}/history`);
-    expect(historyRes.body).toHaveLength(1);
-    expect(historyRes.body[0].changed_by).toBe('updater');
-    expect(historyRes.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
+    const changesRes = await request(app).get(`/customers/${createRes.body._id}/changes`);
+    expect(changesRes.body).toHaveLength(1);
+    expect(changesRes.body[0].changed_by).toBe('updater');
+    expect(changesRes.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
   });
 
   test('updates last_name and phone fields', async () => {
@@ -407,8 +464,8 @@ describe('PUT /customers/:id', () => {
 
     expect(res.status).toBe(200);
 
-    const historyRes = await request(app).get(`/customers/${createRes.body._id}/history`);
-    expect(historyRes.body).toHaveLength(0);
+    const changesRes = await request(app).get(`/customers/${createRes.body._id}/changes`);
+    expect(changesRes.body).toHaveLength(0);
   });
 
   test('returns 404 for non-existent customer', async () => {
@@ -473,9 +530,13 @@ describe('PATCH /customers/:id (merge)', () => {
       .send({ merge: sourceRes.body._id });
 
     expect(res.status).toBe(200);
-    expect(res.body.aliases).toHaveLength(2);
-    expect(res.body.aliases[1].source_system).toBe('ERP');
+    expect(res.body.aliases).toBeUndefined();
     expect(res.body.updated_by).toBe('merger');
+
+    // Verify aliases transferred via child resource
+    const aliasRes = await request(app).get(`/customers/${targetRes.body._id}/aliases`);
+    expect(aliasRes.body).toHaveLength(2);
+    expect(aliasRes.body[1].source_system).toBe('ERP');
 
     // Source should be soft-deleted and merged
     const sourceDb = await Customer.findById(sourceRes.body._id);
@@ -532,9 +593,9 @@ describe('PATCH /customers/:id (merge)', () => {
       .set('x-user-id', 'merger')
       .send({ merge: sourceRes.body._id });
 
-    const targetHistory = await request(app).get(`/customers/${targetRes.body._id}/history`);
-    expect(targetHistory.body).toHaveLength(1);
-    expect(targetHistory.body[0].delta.merge.action).toBe('merged');
+    const targetChanges = await request(app).get(`/customers/${targetRes.body._id}/changes`);
+    expect(targetChanges.body).toHaveLength(1);
+    expect(targetChanges.body[0].delta.merge.action).toBe('merged');
 
     const sourceDb = await Customer.findById(sourceRes.body._id);
     expect(sourceDb.change_history).toHaveLength(1);
@@ -697,7 +758,33 @@ describe('DELETE /customers/:id', () => {
   });
 });
 
-describe('GET /customers/:id/history', () => {
+describe('GET /customers/:id/aliases', () => {
+  test('returns aliases for a customer', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get(`/customers/${createRes.body._id}/aliases`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].source_system).toBe('CRM');
+    expect(res.body[0].source_key).toBe('CRM-001');
+  });
+
+  test('returns 404 for non-existent customer', async () => {
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await request(app).get(`/customers/${fakeId}/aliases`);
+    expect(res.status).toBe(404);
+  });
+
+  test('returns 404 for invalid ID format', async () => {
+    const res = await request(app).get('/customers/invalid-id/aliases');
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('GET /customers/:id/changes', () => {
   test('returns change history for a customer', async () => {
     const createRes = await request(app)
       .post('/customers')
@@ -709,7 +796,7 @@ describe('GET /customers/:id/history', () => {
       .set('x-user-id', 'updater')
       .send({ first_name: 'Jane' });
 
-    const res = await request(app).get(`/customers/${createRes.body._id}/history`);
+    const res = await request(app).get(`/customers/${createRes.body._id}/changes`);
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
@@ -717,12 +804,12 @@ describe('GET /customers/:id/history', () => {
 
   test('returns 404 for non-existent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/customers/${fakeId}/history`);
+    const res = await request(app).get(`/customers/${fakeId}/changes`);
     expect(res.status).toBe(404);
   });
 
   test('returns 404 for invalid ID format', async () => {
-    const res = await request(app).get('/customers/invalid-id/history');
+    const res = await request(app).get('/customers/invalid-id/changes');
     expect(res.status).toBe(404);
   });
 });
@@ -776,13 +863,13 @@ describe('Error handling (edge cases)', () => {
   });
 
   test('GET by ID returns 500 on unexpected error', async () => {
-    const originalFindOne = Customer.findOne;
-    Customer.findOne = jest.fn().mockRejectedValue(new Error('db down'));
+    const originalFindById = Customer.findById;
+    Customer.findById = jest.fn().mockRejectedValue(new Error('db down'));
 
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app).get(`/customers/${fakeId}`);
     expect(res.status).toBe(500);
-    Customer.findOne = originalFindOne;
+    Customer.findById = originalFindById;
   });
 
   test('PUT returns 500 on unexpected error', async () => {
@@ -863,12 +950,22 @@ describe('Error handling (edge cases)', () => {
     Customer.findOne = originalFindOne;
   });
 
-  test('GET history returns 500 on unexpected error', async () => {
+  test('GET changes returns 500 on unexpected error', async () => {
     const originalFindById = Customer.findById;
     Customer.findById = jest.fn().mockRejectedValue(new Error('db down'));
 
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/customers/${fakeId}/history`);
+    const res = await request(app).get(`/customers/${fakeId}/changes`);
+    expect(res.status).toBe(500);
+    Customer.findById = originalFindById;
+  });
+
+  test('GET aliases returns 500 on unexpected error', async () => {
+    const originalFindById = Customer.findById;
+    Customer.findById = jest.fn().mockRejectedValue(new Error('db down'));
+
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await request(app).get(`/customers/${fakeId}/aliases`);
     expect(res.status).toBe(500);
     Customer.findById = originalFindById;
   });
