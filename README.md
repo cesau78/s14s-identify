@@ -26,6 +26,7 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
   - [E.164 Phone Normalization](#e164-phone-normalization)
   - [Address Standardization (USPS Pub 28)](#address-standardization-usps-pub-28)
 - [Audit Trail](#audit-trail)
+- [Atomicity and Transactions](#atomicity-and-transactions)
 - [Soft Deletes](#soft-deletes)
 - [Data Model](#data-model)
 - [Testing](#testing)
@@ -426,6 +427,59 @@ Alias additions are tracked as well, recording the `source_system` and `source_k
 
 ---
 
+## Atomicity and Transactions
+
+Every write operation in the system is designed to be atomic — either it completes fully or has no effect. The strategy depends on the scope of the operation.
+
+### Single-Document Operations
+
+Most endpoints modify a single MongoDB document per request. MongoDB guarantees that single-document writes are atomic without any additional infrastructure:
+
+| Endpoint | Documents Modified | Atomicity |
+|----------|-------------------|-----------|
+| `POST /customers` (new) | 1 Customer | Single-document atomic |
+| `POST /customers` (match) | 1 Customer (alias appended) | Single-document atomic |
+| `PUT /customers/:id` | 1 Customer | Single-document atomic |
+| `DELETE /customers/:id` | 1 Customer (soft-delete fields set) | Single-document atomic |
+| `POST /.../feedback` | 1 MatchFeedback | Single-document atomic |
+
+Because the alias array, change history, and search tokens all live on the Customer document itself, operations that add an alias, record audit deltas, and regenerate tokens are all committed in a single write. There is no window where an alias is added but the audit trail is missing, or where tokens are stale relative to the stored fields.
+
+### Multi-Document Transactions
+
+The **merge operation** (`PATCH /customers/:id`) is the one endpoint that modifies multiple documents in a single request:
+
+1. **Target customer** — receives transferred aliases, updated search tokens, and a merge audit entry
+2. **Source customer** — marked as soft-deleted with `merged_into` pointer and a merge audit entry
+3. **MatchFeedback record** — a `false_negative` entry is created to feed the F1 metrics
+
+If these three writes were independent, a failure after step 1 but before step 3 would leave the system in an inconsistent state — aliases transferred but the source still appearing as an active customer.
+
+To prevent this, the merge handler wraps all three saves in a **MongoDB transaction**:
+
+```js
+const session = await mongoose.startSession();
+try {
+  await session.withTransaction(async () => {
+    await target.save({ session });
+    await source.save({ session });
+    await falseNegative.save({ session });
+  });
+} finally {
+  await session.endSession();
+}
+```
+
+If any save fails, the entire transaction is rolled back and the database remains unchanged. The client receives a `500` error and can safely retry.
+
+### Replica Set Requirement
+
+MongoDB transactions require a replica set. The docker-compose configuration runs MongoDB as a **single-node replica set** (`--replSet rs0`), which provides full transaction support with negligible overhead compared to a standalone instance. The healthcheck automatically initializes the replica set on first boot.
+
+For production deployments, a multi-node replica set is recommended for both transaction support and high availability.
+
+---
+
 ## Soft Deletes
 
 Records are never physically removed. A `DELETE` request sets:
@@ -437,9 +491,7 @@ Soft-deleted records are excluded from all queries by default. Use `?include_del
 
 ## Record Merging
 
-When a customer record is merged into another (e.g., via manual administrative action), the deprecated record is soft-deleted and a `merged_into` pointer is set.
-
-The merge operation modifies three documents atomically (target customer, source customer, and a false negative feedback record) using a **MongoDB transaction**. If any write fails, all changes are rolled back — preventing partial merges where aliases are transferred but the source isn't marked as deleted. This requires a replica set, which the docker-compose configuration provides via a single-node replica set.
+When a customer record is merged into another (e.g., via manual administrative action), the deprecated record is soft-deleted and a `merged_into` pointer is set. The entire operation — alias transfer, source soft-delete, and feedback recording — is executed within a [transaction](#multi-document-transactions) to guarantee all-or-nothing semantics.
 
 Attempts to retrieve the deprecated record via `GET /customers/:id` will return **301 Moved Permanently** with a `Location` header pointing to the new master record. This ensures clients automatically update their references.
 
