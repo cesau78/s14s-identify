@@ -12,7 +12,13 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
   - [Fellegi-Sunter Model](#fellegi-sunter-model)
   - [Jaro-Winkler Distance](#jaro-winkler-distance)
   - [Field Configuration](#field-configuration)
-  - [Match Threshold](#match-threshold)
+  - [Match Threshold and F1 Tuning](#match-threshold-and-f1-tuning)
+- [Match Quality and F1 Feedback Loop](#match-quality-and-f1-feedback-loop)
+  - [Metrics](#metrics)
+  - [Weight Tuning](#weight-tuning)
+  - [Review Queue](#review-queue)
+- [Nickname Normalization](#nickname-normalization)
+- [Typeahead Search](#typeahead-search)
 - [Search Tokens and Candidate Blocking](#search-tokens-and-candidate-blocking)
   - [Token Design](#token-design)
   - [Double Metaphone](#double-metaphone)
@@ -60,20 +66,29 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/customers` | Create or match a customer |
-| `GET` | `/customers` | List all active customers |
-| `GET` | `/customers/:id` | Get a customer by ID |
+| `GET` | `/customers` | List all active customers (`?under_review=true` for review queue) |
+| `GET` | `/customers/search?q=` | Typeahead search by name prefix |
+| `GET` | `/customers/:id` | Get a customer by ID (`?source_system=` for original record) |
 | `PUT` | `/customers/:id` | Update a customer |
+| `PATCH` | `/customers/:id` | Merge another customer into this one |
 | `DELETE` | `/customers/:id` | Soft delete a customer |
-| `GET` | `/customers/:id/history` | Get change history |
+| `GET` | `/customers/:id/aliases` | Get cross-system identity links |
+| `GET` | `/customers/:id/changes` | Get change history |
+| `POST` | `/customers/:id/aliases/:aliasId/feedback` | Report a false positive match |
+| `GET` | `/match-quality` | F1 score, precision, and recall metrics |
+| `GET` | `/match-quality/tune` | Suggested weight adjustments based on feedback |
+| `GET` | `/match-quality/feedback` | List match feedback records |
 
 ### POST Behavior
 
 The `POST /customers` endpoint does not blindly create records. It runs every incoming record through the Fellegi-Sunter matching algorithm against all existing customers:
 
-- **Score >= 0.997 (99.7% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
-- **Score < 0.997** — a new customer record is created with the incoming data as its first alias. The API returns `201`.
+- **Score >= threshold (currently 95% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
+- **Score < threshold** — a new customer record is created with the incoming data as its first alias. The API returns `201`.
 
-This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically.
+This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically. First names are [normalized from nicknames to formal equivalents](#nickname-normalization) before matching (e.g., "Chuck" becomes "Charles"), while the original name is preserved in the alias's `original_payload`.
+
+The threshold is not a fixed constant — it is tunable via the [F1 feedback loop](#match-quality-and-f1-feedback-loop) based on real-world match accuracy.
 
 ### Logic Flow
 
@@ -83,12 +98,13 @@ The following diagram illustrates the control flow for the `POST /customers` end
 graph TD
     A[Start: POST /customers request] --> B{Sanitize Input & Validate};
     B -- Validation Fails --> C[Return 400 Bad Request];
-    B -- Validation OK --> D[Generate Search Tokens];
+    B -- Validation OK --> N[Normalize Nicknames to Formal Names];
+    N --> D[Generate Search Tokens];
     D --> E[Query DB for Candidates];
     E --> F{Iterate through Candidates};
     F -- For each candidate --> G[Calculate Fellegi-Sunter Score];
     G --> F;
-    F -- All candidates scored --> H{Best Score >= 0.997?};
+    F -- All candidates scored --> H{Best Score >= Threshold?};
     H -- Yes --> I[Add Alias to Matched Record];
     I --> K[Save Record & Audit Trail];
     K --> L[Return 200 OK with Matched Customer];
@@ -96,13 +112,27 @@ graph TD
     J --> K;
     L --> M[End];
     C --> M;
+    J -- New Record --> M;
+
+    style H fill:#f9f,stroke:#333
+    linkStyle default stroke:#333
+
+    subgraph Feedback Loop
+        Q[User reports false positive] --> R[POST /:id/aliases/:aliasId/feedback];
+        S[User merges missed match] --> T[PATCH /:id with merge];
+        R --> U[GET /match-quality → F1 score];
+        T --> U;
+        U --> V[GET /match-quality/tune → suggested adjustments];
+        V -. adjust threshold & weights .-> H;
+    end
 ```
 
-1.  **Sanitization**: All incoming data is cleaned and validated.
-2.  **Token Generation**: Search tokens (phonetic, exact) are created from the sanitized data.
+1.  **Sanitization**: All incoming data is cleaned, validated, and [nickname-normalized](#nickname-normalization).
+2.  **Token Generation**: Search tokens (phonetic, prefix, exact) are created from the sanitized data.
 3.  **Candidate Blocking**: The database is queried for records sharing at least one token. This is a highly efficient indexed operation (`O(log N)`).
 4.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
-5.  **Decision**: Based on the highest score, the system either links an alias to an existing record or creates a new one.
+5.  **Decision**: Based on the highest score vs. the current threshold, the system either links an alias or creates a new record.
+6.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
 
 ---
 
@@ -155,11 +185,100 @@ For email and phone fields, exact matching is used — these identifiers are eit
 
 The `email` field carries the most discriminating power due to its extreme m/u ratio — an email match provides strong evidence, while an email mismatch is heavily penalized.
 
-### Match Threshold
+### Match Threshold and F1 Tuning
 
-The match threshold is set at **0.997** (99.7% confidence). This was chosen to minimize false positives — incorrectly merging two distinct people is far more damaging than creating a duplicate record that can be merged later.
+The match threshold is currently set at **0.95** (95% confidence). Rather than relying on a fixed value chosen once, the threshold is designed to be tuned over time using the [F1 feedback loop](#match-quality-and-f1-feedback-loop).
+
+The initial threshold favors minimizing false positives — incorrectly merging two distinct people is far more damaging than creating a duplicate record that can be merged later. As real-world feedback accumulates, the `/match-quality/tune` endpoint analyzes the ratio of false positives to false negatives and suggests adjustments:
+
+- **Too many false positives** (incorrect merges): raise the threshold and tighten field weights
+- **Too many false negatives** (missed matches): lower the threshold and loosen field weights
 
 When both records have no overlapping data (all fields empty), the score is 0. Fields where both records are missing are skipped entirely — they neither help nor hurt the score.
+
+---
+
+## Match Quality and F1 Feedback Loop
+
+The matching engine is not a black box — it has a built-in feedback system that measures accuracy and suggests improvements. This closes the loop between automated matching and human review.
+
+### Metrics
+
+`GET /match-quality` computes precision, recall, and F1 score from accumulated feedback:
+
+| Metric | Formula | Meaning |
+|--------|---------|---------|
+| **Precision** | TP / (TP + FP) | Of all auto-matches, how many were correct? |
+| **Recall** | TP / (TP + FN) | Of all true matches, how many did the system find? |
+| **F1** | 2 * P * R / (P + R) | Harmonic mean — balances precision and recall |
+
+Where:
+- **True Positive (TP)**: system matched correctly (auto-match with no false positive feedback)
+- **False Positive (FP)**: system matched incorrectly (reported via `POST /:id/aliases/:aliasId/feedback`)
+- **False Negative (FN)**: system missed a match (detected when a manual merge is performed via `PATCH /:id`)
+
+Manual merges automatically record a `false_negative` feedback entry, so the system learns from both explicit feedback and operational corrections.
+
+### Weight Tuning
+
+`GET /match-quality/tune` analyzes the balance of false positives vs. false negatives and returns:
+
+- Current field weights (m/u values) and threshold
+- Suggested adjustments (small 1-2% changes to avoid oscillation)
+- Rationale for the suggestion
+
+The tuning endpoint is advisory — it does not auto-apply changes. This gives operators visibility into how the system would adjust and the opportunity to review before applying.
+
+| Feedback Pattern | Action | Effect |
+|-----------------|--------|--------|
+| FP > 50% of feedback | **Tighten** | Raise threshold +1%, reduce m values, increase u values |
+| FN > 50% of feedback | **Loosen** | Lower threshold -1%, increase m values, reduce u values |
+| Balanced | **None** | No adjustment needed |
+
+### Review Queue
+
+`GET /customers?under_review=true` returns customers with unresolved false positive feedback, ordered by most recent feedback first. This provides a work queue for operators to review and resolve disputed matches.
+
+Feedback records can be filtered via `GET /match-quality/feedback?resolved=false` to see only unresolved items.
+
+---
+
+## Nickname Normalization
+
+Common nicknames and diminutives are automatically normalized to their formal equivalents on ingestion. This improves match recall — a record submitted as "Chuck" will match an existing "Charles" because both are stored under the same canonical name.
+
+| Nickname | Stored As | | Nickname | Stored As |
+|----------|-----------|-|----------|-----------|
+| Chuck | Charles | | Bill | William |
+| Bob | Robert | | Mike | Michael |
+| Jim | James | | Liz | Elizabeth |
+| Becky | Rebecca | | Kate | Katherine |
+
+The dictionary covers ~130 common English nicknames (both male and female). Names not in the dictionary are stored as-is.
+
+The original name is always preserved in the alias's `original_payload` field. To retrieve the original record as submitted by a specific source system, use:
+
+```
+GET /customers/:id?source_system=CRM
+```
+
+This overlays the `original_payload` fields from the matching alias onto the response, returning `first_name: "Chuck"` instead of the canonical `first_name: "Charles"`.
+
+Typeahead search also expands nicknames — searching for "chuck" will query both "chuck" and "charles" prefix tokens.
+
+---
+
+## Typeahead Search
+
+`GET /customers/search?q=jo&limit=20` provides fast prefix-based name search optimized for 10M+ records. The search uses indexed prefix tokens (`fp:` and `lp:`) for `O(log N)` lookups — no collection scans.
+
+- Minimum query length: 2 characters
+- Matches against the beginning of `first_name` or `last_name`, case-insensitive
+- Excludes soft-deleted customers
+- Default limit: 20, max: 100
+- Nicknames are expanded (searching "chuck" also matches "charles" prefix tokens)
+
+Prefix tokens are generated at ingestion time for every substring from length 2 to full name length. For example, "John" produces tokens `fp:jo`, `fp:joh`, `fp:john`. These are stored in the same `search_tokens` array and backed by the same compound index used for match candidate blocking.
 
 ---
 
@@ -174,7 +293,7 @@ When a new record arrives, the system generates tokens from the incoming data, q
 Each customer stores a flat `search_tokens` array of prefixed strings:
 
 ```
-["fn:JN", "fn:AN", "ln:SM0", "em:john", "ed:example.com", "ph:5309", "ph:8675309", "sn:123", "ss:MN", "zp:62701"]
+["fn:JN", "fn:AN", "fp:jo", "fp:joh", "fp:john", "ln:SM0", "lp:sm", "lp:smi", "lp:smit", "lp:smith", "em:john", "ed:example.com", "ph:5309", "ph:8675309", "sn:123", "ss:MN", "zp:62701"]
 ```
 
 Prefixes prevent cross-field collisions (e.g., a ZIP code matching a phone suffix). A single compound index on `{ search_tokens: 1, deleted_at: 1 }` handles all token lookups efficiently.
@@ -182,7 +301,9 @@ Prefixes prevent cross-field collisions (e.g., a ZIP code matching a phone suffi
 | Field | Prefix | Token Logic |
 |-------|--------|-------------|
 | `first_name` | `fn:` | Double Metaphone primary + alternate (if different) |
+| `first_name` | `fp:` | Lowercased prefix substrings (length 2 to full) for typeahead |
 | `last_name` | `ln:` | Double Metaphone primary + alternate (if different) |
+| `last_name` | `lp:` | Lowercased prefix substrings (length 2 to full) for typeahead |
 | `email` | `em:`, `ed:` | Lowercased local part and domain |
 | `phone` | `ph:` | Last 4 digits and last 7 digits of E.164 number |
 | `address.street` | `sn:`, `ss:` | Street number (exact) + Double Metaphone of street name words |
@@ -328,7 +449,7 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `first_name` | String | Required |
+| `first_name` | String | Required. Nicknames normalized to formal equivalents on ingestion |
 | `last_name` | String | Required |
 | `email` | String | Required, stored lowercase |
 | `phone` | String | Stored in E.164 format |
@@ -356,12 +477,28 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 | `match_confidence` | Number | Fellegi-Sunter score (0–1) when matched; null for record creation |
 | `match_algorithm` | String | Algorithm used (e.g., `fellegi-sunter`); null for record creation |
 
+### MatchFeedback
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | String | `false_positive` or `false_negative` |
+| `customer_id` | ObjectId | The customer record involved |
+| `alias_id` | ObjectId | The alias reported as incorrect (false positives only) |
+| `related_customer_id` | ObjectId | The other customer involved (false negatives / merges) |
+| `original_confidence` | Number | The match confidence when the alias was linked |
+| `original_algorithm` | String | Algorithm used (e.g., `fellegi-sunter`) |
+| `reported_by` | String | User who reported the feedback |
+| `reported_at` | Date | When feedback was reported |
+| `resolved` | Boolean | Whether the issue has been resolved (default: false) |
+| `resolved_at` | Date | When the issue was resolved |
+| `notes` | String | Optional explanation |
+
 ### Indexes
 
 - `deleted_at` — fast filtering for active/deleted records
 - `email` — candidate lookup during matching
 - `aliases.source_system + aliases.source_key` — compound index for source system lookups
-- `search_tokens + deleted_at` — compound multikey index for token-based candidate blocking
+- `search_tokens + deleted_at` — compound multikey index for token-based candidate blocking and typeahead search
 
 ---
 
@@ -379,7 +516,7 @@ npm run build
 
 Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
 
-Current status: **221 tests, 100% coverage across all metrics.**
+Current status: **289 tests across 13 test suites.**
 
 ---
 
@@ -397,14 +534,18 @@ src/
     alias.js                      Alias subdocument schema
     changeRecord.js               Change record subdocument schema
     customer.js                   Mongoose schema and indexes
+    matchFeedback.js              F1 feedback records (false positives/negatives)
   routes/
-    customerRoutes.js             REST endpoints `(List: O(N), ID-based: O(log N), Create/Match: O(log N + C))`
+    customerRoutes.js             REST endpoints (List, CRUD, search, merge, feedback)
+    matchQualityRoutes.js         F1 metrics, tuning suggestions, feedback listing
   services/
-    auditDelta.js                 Field-level change delta computation `(O(1))`
-    addressStandardizer.js        USPS Pub 28 address standardization `(O(L) per field)`
-    customerMatchingService.js    Fellegi-Sunter matching `(findMatch: O(log N + C), score: O(1))`
-    inputSanitizer.js             Input validation and E.164 normalization `(O(L) per field)`
-    searchTokenService.js         Double Metaphone token generation `(O(L) per field)`
+    auditDelta.js                 Field-level change delta computation
+    addressStandardizer.js        USPS Pub 28 address standardization
+    customerMatchingService.js    Fellegi-Sunter matching (findMatch: O(log N + C), score: O(1))
+    inputSanitizer.js             Input validation, E.164 normalization, nickname normalization
+    matchQualityService.js        F1 computation, weight adjustment suggestions
+    nicknameDictionary.js         ~130 nickname-to-formal-name mappings
+    searchTokenService.js         Phonetic, prefix, and exact token generation
   swagger/
     swaggerConfig.js              OpenAPI spec generation
 
@@ -418,7 +559,9 @@ tests/
     alias.test.js
     changeRecord.test.js
     customer.test.js
-  routes/customerRoutes.test.js
+  routes/
+    customerRoutes.test.js
+    matchQuality.test.js
   services/
     addressStandardizer.test.js
     auditDelta.test.js
