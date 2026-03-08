@@ -202,11 +202,11 @@ describe('Input Sanitizer', () => {
   describe('sanitizeCustomerUpdate', () => {
     test('sanitizes update fields', () => {
       const { errors, sanitized } = sanitizeCustomerUpdate({
-        first_name: '  Jane  ',
+        first_name: '  Sarah  ',
         phone: '(214) 555-1234'
       });
       expect(errors).toHaveLength(0);
-      expect(sanitized.first_name).toBe('Jane');
+      expect(sanitized.first_name).toBe('Sarah');
       expect(sanitized.phone).toBe('+12145551234');
     });
 

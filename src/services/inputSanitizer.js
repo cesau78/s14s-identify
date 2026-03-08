@@ -1,5 +1,6 @@
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
 const { standardizeAddress } = require('./addressStandardizer');
+const { toFormalName } = require('./nicknameDictionary');
 
 function sanitizeString(value) {
   if (value === null || value === undefined) return '';
@@ -38,7 +39,7 @@ function sanitizeAddress(address) {
 function sanitizeCustomerInput(body) {
   const errors = [];
 
-  const first_name = sanitizeString(body.first_name);
+  const first_name = toFormalName(sanitizeString(body.first_name));
   const last_name = sanitizeString(body.last_name);
   const email = sanitizeEmail(body.email);
   const source_system = sanitizeString(body.source_system);
@@ -81,7 +82,7 @@ function sanitizeCustomerUpdate(body) {
   const sanitized = {};
 
   if (body.first_name !== undefined) {
-    const val = sanitizeString(body.first_name);
+    const val = toFormalName(sanitizeString(body.first_name));
     if (!val) {
       errors.push('first_name cannot be empty');
     } else {

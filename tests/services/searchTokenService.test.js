@@ -287,13 +287,13 @@ describe('Search Token Service', () => {
 
   describe('generateSearchQueryTokens', () => {
     test('generates fp: and lp: tokens for a query', () => {
-      const tokens = generateSearchQueryTokens('jo');
-      expect(tokens).toEqual(['fp:jo', 'lp:jo']);
+      const tokens = generateSearchQueryTokens('john');
+      expect(tokens).toEqual(['fp:john', 'lp:john']);
     });
 
     test('lowercases and trims the query', () => {
-      const tokens = generateSearchQueryTokens('  JO  ');
-      expect(tokens).toEqual(['fp:jo', 'lp:jo']);
+      const tokens = generateSearchQueryTokens('  JOHN  ');
+      expect(tokens).toEqual(['fp:john', 'lp:john']);
     });
 
     test('returns empty for single character', () => {
@@ -303,6 +303,29 @@ describe('Search Token Service', () => {
     test('returns empty for empty input', () => {
       expect(generateSearchQueryTokens('')).toEqual([]);
       expect(generateSearchQueryTokens(null)).toEqual([]);
+    });
+
+    test('expands nickname to formal name tokens', () => {
+      const tokens = generateSearchQueryTokens('chuck');
+      expect(tokens).toContain('fp:chuck');
+      expect(tokens).toContain('lp:chuck');
+      expect(tokens).toContain('fp:charles');
+      expect(tokens).toContain('lp:charles');
+    });
+
+    test('does not add formal tokens for non-nickname', () => {
+      const tokens = generateSearchQueryTokens('john');
+      expect(tokens).toEqual(['fp:john', 'lp:john']);
+    });
+
+    test('deduplicates when nickname equals formal name', () => {
+      // "mary" maps to "mary" in the dictionary
+      const tokens = generateSearchQueryTokens('mary');
+      expect(tokens).toContain('fp:mary');
+      expect(tokens).toContain('lp:mary');
+      // Should not have duplicates
+      const unique = [...new Set(tokens)];
+      expect(tokens.length).toBe(unique.length);
     });
   });
 });

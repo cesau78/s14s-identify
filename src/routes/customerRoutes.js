@@ -573,6 +573,15 @@ router.get('/search', async (req, res) => {
  *         description: >
  *           Comma-separated list of child resources to include in the response.
  *           Valid values: aliases, changes. Example: ?show=aliases,changes
+ *       - in: query
+ *         name: source_system
+ *         schema:
+ *           type: string
+ *         description: >
+ *           When provided, returns the original record from the specified source system
+ *           instead of the canonical/standardized record. The response fields (first_name,
+ *           last_name, email, phone, address) are overlaid from the alias's original_payload.
+ *           Returns 404 if no alias exists for the given source_system.
  *     responses:
  *       200:
  *         description: Customer found
@@ -605,7 +614,29 @@ router.get('/:id', async (req, res) => {
     }
 
     const show = parseShow(req.query);
-    return res.status(200).json(customerResponse(customer, show));
+    const response = customerResponse(customer, show);
+
+    // If source_system is specified, overlay original_payload from that alias
+    if (req.query.source_system) {
+      const alias = customer.aliases.find(
+        a => a.source_system === req.query.source_system
+      );
+      if (!alias) {
+        return res.status(404).json({
+          error: `No alias found for source_system '${req.query.source_system}'`
+        });
+      }
+      const orig = alias.original_payload || {};
+      if (orig.first_name !== undefined) response.first_name = orig.first_name;
+      if (orig.last_name !== undefined) response.last_name = orig.last_name;
+      if (orig.email !== undefined) response.email = orig.email;
+      if (orig.phone !== undefined) response.phone = orig.phone;
+      if (orig.address !== undefined) response.address = orig.address;
+      response.source_system = alias.source_system;
+      response.source_key = alias.source_key;
+    }
+
+    return res.status(200).json(response);
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });

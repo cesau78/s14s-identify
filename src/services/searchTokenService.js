@@ -99,11 +99,19 @@ function generateSearchTokens(data) {
   return [...new Set(tokens)];
 }
 
+const { getFormalName } = require('./nicknameDictionary');
+
 function generateSearchQueryTokens(query) {
   if (!query) return [];
   const term = query.toLowerCase().trim();
   if (term.length < 2) return [];
-  return [`fp:${term}`, `lp:${term}`];
+  const tokens = [`fp:${term}`, `lp:${term}`];
+  // If the query is a known nickname, also search by the formal name prefix
+  const formal = getFormalName(term);
+  if (formal) {
+    tokens.push(`fp:${formal}`, `lp:${formal}`);
+  }
+  return [...new Set(tokens)];
 }
 
 module.exports = {

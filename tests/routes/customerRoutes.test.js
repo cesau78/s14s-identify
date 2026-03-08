@@ -312,12 +312,12 @@ describe('GET /customers/:id', () => {
     await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
-      .send({ first_name: 'Jane' });
+      .send({ first_name: 'Sarah' });
 
     const res = await request(app).get(`/customers/${createRes.body._id}?show=changes`);
     expect(res.status).toBe(200);
     expect(res.body.changes).toHaveLength(1);
-    expect(res.body.changes[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
+    expect(res.body.changes[0].delta.first_name).toEqual({ from: 'John', to: 'Sarah' });
     expect(res.body.aliases).toBeUndefined();
   });
 
@@ -330,7 +330,7 @@ describe('GET /customers/:id', () => {
     await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
-      .send({ first_name: 'Jane' });
+      .send({ first_name: 'Sarah' });
 
     const res = await request(app).get(`/customers/${createRes.body._id}?show=aliases,changes`);
     expect(res.status).toBe(200);
@@ -401,18 +401,18 @@ describe('PUT /customers/:id', () => {
     const res = await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
-      .send({ first_name: 'Jane', email: 'jane@example.com' });
+      .send({ first_name: 'Sarah', email: 'sarah@example.com' });
 
     expect(res.status).toBe(200);
-    expect(res.body.first_name).toBe('Jane');
-    expect(res.body.email).toBe('jane@example.com');
+    expect(res.body.first_name).toBe('Sarah');
+    expect(res.body.email).toBe('sarah@example.com');
     expect(res.body.updated_by).toBe('updater');
     expect(res.body.updated_at).toBeTruthy();
 
     const changesRes = await request(app).get(`/customers/${createRes.body._id}/changes`);
     expect(changesRes.body).toHaveLength(1);
     expect(changesRes.body[0].changed_by).toBe('updater');
-    expect(changesRes.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
+    expect(changesRes.body[0].delta.first_name).toEqual({ from: 'John', to: 'Sarah' });
   });
 
   test('updates last_name and phone fields', async () => {
@@ -794,12 +794,12 @@ describe('GET /customers/:id/changes', () => {
     await request(app)
       .put(`/customers/${createRes.body._id}`)
       .set('x-user-id', 'updater')
-      .send({ first_name: 'Jane' });
+      .send({ first_name: 'Sarah' });
 
     const res = await request(app).get(`/customers/${createRes.body._id}/changes`);
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
-    expect(res.body[0].delta.first_name).toEqual({ from: 'John', to: 'Jane' });
+    expect(res.body[0].delta.first_name).toEqual({ from: 'John', to: 'Sarah' });
   });
 
   test('returns 404 for non-existent customer', async () => {
@@ -811,6 +811,178 @@ describe('GET /customers/:id/changes', () => {
   test('returns 404 for invalid ID format', async () => {
     const res = await request(app).get('/customers/invalid-id/changes');
     expect(res.status).toBe(404);
+  });
+});
+
+describe('Nickname normalization', () => {
+  test('normalizes nickname to formal name on creation', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Chuck',
+        source_system: 'CRM',
+        source_key: 'CRM-NICK-1'
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.first_name).toBe('Charles');
+  });
+
+  test('preserves original name in alias original_payload', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Chuck',
+        source_system: 'CRM',
+        source_key: 'CRM-NICK-2'
+      });
+
+    const aliasRes = await request(app).get(`/customers/${res.body._id}/aliases`);
+    expect(aliasRes.body[0].original_payload.first_name).toBe('Chuck');
+  });
+
+  test('normalizes nickname on update', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .put(`/customers/${createRes.body._id}`)
+      .set('x-user-id', 'updater')
+      .send({ first_name: 'Bob' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.first_name).toBe('Robert');
+  });
+
+  test('leaves non-nickname names unchanged', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    expect(res.status).toBe(201);
+    expect(res.body.first_name).toBe('John');
+  });
+
+  test('matches nickname variant to existing formal record', async () => {
+    // Create with formal name
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'William',
+        source_system: 'CRM',
+        source_key: 'CRM-FORMAL-1'
+      });
+
+    // Submit with nickname — should match since Bill normalizes to William
+    const matchRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Bill',
+        source_system: 'ERP',
+        source_key: 'ERP-NICK-1'
+      });
+
+    expect(matchRes.status).toBe(200);
+    expect(matchRes.body._id).toBe(createRes.body._id);
+  });
+});
+
+describe('GET /customers/:id?source_system', () => {
+  test('returns original payload fields for specified source_system', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Chuck',
+        source_system: 'CRM',
+        source_key: 'CRM-SS-1'
+      });
+
+    const res = await request(app).get(
+      `/customers/${createRes.body._id}?source_system=CRM`
+    );
+
+    expect(res.status).toBe(200);
+    // Should return the original "Chuck" not the normalized "Charles"
+    expect(res.body.first_name).toBe('Chuck');
+    expect(res.body.source_system).toBe('CRM');
+    expect(res.body.source_key).toBe('CRM-SS-1');
+  });
+
+  test('returns canonical record without source_system param', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Chuck',
+        source_system: 'CRM',
+        source_key: 'CRM-SS-2'
+      });
+
+    const res = await request(app).get(`/customers/${createRes.body._id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.first_name).toBe('Charles');
+    expect(res.body.source_system).toBeUndefined();
+  });
+
+  test('returns 404 for non-existent source_system', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app).get(
+      `/customers/${createRes.body._id}?source_system=NONEXISTENT`
+    );
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/No alias found/);
+  });
+
+  test('returns correct source when multiple aliases exist', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Chuck',
+        source_system: 'CRM',
+        source_key: 'CRM-SS-3'
+      });
+
+    // Add a second alias via matching
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Charlie',
+        source_system: 'ERP',
+        source_key: 'ERP-SS-3'
+      });
+
+    const crmRes = await request(app).get(
+      `/customers/${createRes.body._id}?source_system=CRM`
+    );
+    expect(crmRes.body.first_name).toBe('Chuck');
+
+    const erpRes = await request(app).get(
+      `/customers/${createRes.body._id}?source_system=ERP`
+    );
+    expect(erpRes.body.first_name).toBe('Charlie');
   });
 });
 
