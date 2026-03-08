@@ -39,7 +39,7 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
 # Install dependencies
 npm install
 
-# Start MongoDB (via Docker)
+# Start MongoDB (single-node replica set for transaction support)
 docker compose up -d
 
 # Seed 1000 sample customers
@@ -438,6 +438,8 @@ Soft-deleted records are excluded from all queries by default. Use `?include_del
 ## Record Merging
 
 When a customer record is merged into another (e.g., via manual administrative action), the deprecated record is soft-deleted and a `merged_into` pointer is set.
+
+The merge operation modifies three documents atomically (target customer, source customer, and a false negative feedback record) using a **MongoDB transaction**. If any write fails, all changes are rolled back — preventing partial merges where aliases are transferred but the source isn't marked as deleted. This requires a replica set, which the docker-compose configuration provides via a single-node replica set.
 
 Attempts to retrieve the deprecated record via `GET /customers/:id` will return **301 Moved Permanently** with a `Location` header pointing to the new master record. This ensures clients automatically update their references.
 

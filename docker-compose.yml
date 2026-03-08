@@ -5,6 +5,21 @@ services:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    command: ["mongod", "--replSet", "rs0"]
+    healthcheck:
+      test: |
+        mongosh --quiet --eval "
+          try {
+            rs.status().ok && quit(0);
+          } catch(e) {
+            rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] });
+            quit(1);
+          }
+        "
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
 volumes:
   mongo-data:

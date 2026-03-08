@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Customer = require('../models/customer');
 const MatchFeedback = require('../models/matchFeedback');
 const { findMatch } = require('../services/customerMatchingService');
@@ -883,7 +884,17 @@ router.patch('/:id', async (req, res) => {
       notes: 'Auto-recorded: manual merge indicates missed auto-match'
     });
 
-    await Promise.all([target.save(), source.save(), falseNegative.save()]);
+    // All three saves must succeed or none — use a transaction
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await target.save({ session });
+        await source.save({ session });
+        await falseNegative.save({ session });
+      });
+    } finally {
+      await session.endSession();
+    }
 
     return res.status(200).json(customerResponse(target));
   } catch (error) {
