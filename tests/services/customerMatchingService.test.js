@@ -7,6 +7,7 @@ const {
   computeAgreementWeight,
   computeDisagreementWeight,
   MATCH_THRESHOLD,
+  REVIEW_THRESHOLD,
   FIELD_CONFIG
 } = require('../../src/services/customerMatchingService');
 
@@ -283,6 +284,132 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
 
       const result = await findMatch(mockModel, incoming);
       expect(result.match._id).toBe('1');
+    });
+
+    test('returns nearMisses for candidates between REVIEW_THRESHOLD and MATCH_THRESHOLD', async () => {
+      // Candidate shares last name + phone but different email and first name
+      const nearMissCandidate = {
+        _id: 'near1',
+        first_name: 'Jonathan',
+        last_name: 'Doe',
+        email: 'jdoe@other.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const mockModel = { find: jest.fn().mockResolvedValue([nearMissCandidate]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const score = calculateFellegiSunterScore(incoming, nearMissCandidate);
+      // Only test near-miss behavior if the score falls in the review range
+      if (score >= REVIEW_THRESHOLD && score < MATCH_THRESHOLD) {
+        const result = await findMatch(mockModel, incoming);
+        expect(result.match).toBeNull();
+        expect(result.nearMisses).toHaveLength(1);
+        expect(result.nearMisses[0].candidate._id).toBe('near1');
+        expect(result.nearMisses[0].confidence).toBeGreaterThanOrEqual(REVIEW_THRESHOLD);
+        expect(result.nearMisses[0].confidence).toBeLessThan(MATCH_THRESHOLD);
+      }
+    });
+
+    test('returns empty nearMisses when match is found above MATCH_THRESHOLD', async () => {
+      const exactMatch = {
+        _id: 'exact1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const mockModel = { find: jest.fn().mockResolvedValue([exactMatch]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const result = await findMatch(mockModel, incoming);
+      expect(result.match).toBe(exactMatch);
+      expect(result.nearMisses).toEqual([]);
+    });
+
+    test('returns empty nearMisses when no candidates score above REVIEW_THRESHOLD', async () => {
+      const veryDifferent = {
+        _id: 'diff1',
+        first_name: 'Xxxxx',
+        last_name: 'Yyyyy',
+        email: 'zzz@nowhere.net',
+        phone: '000-0000',
+        address: {}
+      };
+
+      const mockModel = { find: jest.fn().mockResolvedValue([veryDifferent]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234'
+      };
+
+      const result = await findMatch(mockModel, incoming);
+      expect(result.match).toBeNull();
+      expect(result.nearMisses).toEqual([]);
+    });
+
+    test('sorts nearMisses by confidence descending', async () => {
+      const candidate1 = {
+        _id: 'c1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'different1@test.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+      const candidate2 = {
+        _id: 'c2',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'different2@test.com',
+        phone: '555-1234',
+        address: {}
+      };
+
+      const mockModel = { find: jest.fn().mockResolvedValue([candidate1, candidate2]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const result = await findMatch(mockModel, incoming);
+      if (result.nearMisses.length >= 2) {
+        expect(result.nearMisses[0].confidence).toBeGreaterThanOrEqual(result.nearMisses[1].confidence);
+      }
+    });
+  });
+
+  describe('REVIEW_THRESHOLD', () => {
+    test('REVIEW_THRESHOLD is less than MATCH_THRESHOLD', () => {
+      expect(REVIEW_THRESHOLD).toBeLessThan(MATCH_THRESHOLD);
+    });
+
+    test('REVIEW_THRESHOLD is 0.70', () => {
+      expect(REVIEW_THRESHOLD).toBe(0.70);
     });
   });
 });

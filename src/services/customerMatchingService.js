@@ -47,6 +47,7 @@ const FIELD_CONFIG = {
 };
 
 const MATCH_THRESHOLD = 0.95;
+const REVIEW_THRESHOLD = 0.70;
 
 function normalizeString(value) {
   if (!value) return '';
@@ -129,20 +130,35 @@ async function findMatch(Customer, incomingData) {
 
   let bestMatch = null;
   let bestConfidence = 0;
+  const nearMisses = [];
 
   for (const candidate of candidates) {
     const confidence = calculateFellegiSunterScore(incomingData, candidate);
     if (confidence > bestConfidence) {
+      // Demote previous best to near-miss if it qualifies
+      if (bestMatch && bestConfidence >= REVIEW_THRESHOLD && bestConfidence < MATCH_THRESHOLD) {
+        nearMisses.push({ candidate: bestMatch, confidence: bestConfidence });
+      }
       bestConfidence = confidence;
       bestMatch = candidate;
+    } else if (confidence >= REVIEW_THRESHOLD && confidence < MATCH_THRESHOLD) {
+      nearMisses.push({ candidate, confidence });
     }
   }
 
   if (bestConfidence >= MATCH_THRESHOLD) {
-    return { match: bestMatch, confidence: bestConfidence };
+    return { match: bestMatch, confidence: bestConfidence, nearMisses: [] };
   }
 
-  return { match: null, confidence: bestConfidence };
+  // Best match didn't meet auto-approve — include it in near-misses if it qualifies
+  if (bestMatch && bestConfidence >= REVIEW_THRESHOLD) {
+    nearMisses.push({ candidate: bestMatch, confidence: bestConfidence });
+  }
+
+  // Sort near-misses by confidence descending
+  nearMisses.sort((a, b) => b.confidence - a.confidence);
+
+  return { match: null, confidence: bestConfidence, nearMisses };
 }
 
 module.exports = {
@@ -154,5 +170,6 @@ module.exports = {
   computeAgreementWeight,
   computeDisagreementWeight,
   MATCH_THRESHOLD,
+  REVIEW_THRESHOLD,
   FIELD_CONFIG
 };

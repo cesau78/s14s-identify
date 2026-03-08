@@ -22,6 +22,14 @@ const customerSchema = new mongoose.Schema({
   deleted_by: { type: String, default: null },
   deleted_at: { type: Date, default: null },
   search_tokens: [{ type: String }],
+  pending_matches: [{
+    candidate_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
+    confidence: { type: Number, required: true },
+    algorithm: { type: String, default: 'fellegi-sunter' },
+    status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    reviewed_by: { type: String, default: null },
+    reviewed_at: { type: Date, default: null }
+  }],
   merged_into: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null }
 }, {
   timestamps: false,
