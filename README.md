@@ -17,6 +17,7 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
   - [Metrics](#metrics)
   - [Weight Tuning](#weight-tuning)
   - [Review Queue](#review-queue)
+- [Near-Miss Candidates and Pending Match Review](#near-miss-candidates-and-pending-match-review)
 - [Nickname Normalization](#nickname-normalization)
 - [Typeahead Search](#typeahead-search)
 - [Search Tokens and Candidate Blocking](#search-tokens-and-candidate-blocking)
@@ -76,6 +77,9 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 | `GET` | `/customers/:id/aliases` | Get cross-system identity links |
 | `GET` | `/customers/:id/changes` | Get change history |
 | `POST` | `/customers/:id/aliases/:aliasId/feedback` | Report a false positive match |
+| `GET` | `/customers/:id/pending-matches` | Get near-miss match candidates |
+| `POST` | `/customers/:id/pending-matches/:matchId/approve` | Approve a pending match (merges records) |
+| `POST` | `/customers/:id/pending-matches/:matchId/reject` | Reject a pending match |
 | `GET` | `/match-quality` | F1 score, precision, and recall metrics |
 | `GET` | `/match-quality/tune` | Suggested weight adjustments based on feedback |
 | `GET` | `/match-quality/feedback` | List match feedback records |
@@ -84,8 +88,9 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 
 The `POST /customers` endpoint does not blindly create records. It runs every incoming record through the Fellegi-Sunter matching algorithm against all existing customers:
 
-- **Score >= threshold (currently 95% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
-- **Score < threshold** — a new customer record is created with the incoming data as its first alias. The API returns `201`.
+- **Score >= auto-approve threshold (currently 95% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
+- **Score >= review threshold (70%) but < auto-approve** — a new customer record is created, and the near-miss candidates are attached as `pending_matches` for [manual review](#near-miss-candidates-and-pending-match-review). The API returns `201` with the pending matches included.
+- **Score < review threshold** — a new customer record is created with no pending matches. The API returns `201`.
 
 This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically. First names are [normalized from nicknames to formal equivalents](#nickname-normalization) before matching (e.g., "Chuck" becomes "Charles"), while the original name is preserved in the alias's `original_payload`.
 
@@ -105,15 +110,26 @@ graph TD
     E --> F{Iterate through Candidates};
     F -- For each candidate --> G[Calculate Fellegi-Sunter Score];
     G --> F;
-    F -- All candidates scored --> H{Best Score >= Threshold?};
+    F -- All candidates scored --> H{Best Score >= Auto-Approve?};
     H -- Yes --> I[Add Alias to Matched Record];
     I --> K[Save Record & Audit Trail];
     K --> L[Return 200 OK with Matched Customer];
-    H -- No --> J[Create New Customer Record];
-    J --> K;
+    H -- No --> NM{Any Candidates >= Review Threshold?};
+    NM -- Yes --> J2[Create New Record + Pending Matches];
+    NM -- No --> J[Create New Customer Record];
+    J --> K2[Save Record];
+    J2 --> K2;
+    K2 --> L2[Return 201 Created];
     L --> M[End];
     C --> M;
-    J -- New Record --> M;
+    L2 --> M;
+
+    subgraph Review Workflow
+        PM[GET /:id/pending-matches] --> RV{Reviewer Decision};
+        RV -- Approve --> AP[POST /.../approve → Merge Records];
+        RV -- Reject --> RJ[POST /.../reject → Confirm Distinct];
+        AP --> FB2[Record false_negative feedback];
+    end
 
     style H fill:#f9f,stroke:#333
     linkStyle default stroke:#333
@@ -132,8 +148,12 @@ graph TD
 2.  **Token Generation**: Search tokens (phonetic, prefix, exact) are created from the sanitized data.
 3.  **Candidate Blocking**: The database is queried for records sharing at least one token. This is a highly efficient indexed operation (`O(log N)`).
 4.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
-5.  **Decision**: Based on the highest score vs. the current threshold, the system either links an alias or creates a new record.
-6.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
+5.  **Decision**: Three-tier outcome based on score:
+    - **>= auto-approve** (0.95): alias linked automatically (200)
+    - **>= review threshold** (0.70): new record created with `pending_matches` for manual review (201)
+    - **< review threshold**: new record created, no pending matches (201)
+6.  **Review Workflow**: Pending matches can be approved (triggering a merge) or rejected (confirming distinct records). Approvals feed the F1 loop as false negatives.
+7.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
 
 ---
 
@@ -241,6 +261,50 @@ The tuning endpoint is advisory — it does not auto-apply changes. This gives o
 `GET /customers?under_review=true` returns customers with unresolved false positive feedback, ordered by most recent feedback first. This provides a work queue for operators to review and resolve disputed matches.
 
 Feedback records can be filtered via `GET /match-quality/feedback?resolved=false` to see only unresolved items.
+
+---
+
+## Near-Miss Candidates and Pending Match Review
+
+When a new record is created (201 response), the system also evaluates all candidates that scored above the **review threshold** (0.70) but below the **auto-approve threshold** (currently 0.95, tuned by the F1 feedback loop). These "near-miss" candidates are stored as `pending_matches` on the new customer record and included in the 201 response.
+
+This enables a targeted review workflow:
+
+1. **POST /customers** — if no auto-match, the 201 response includes a `pending_matches` array with candidate IDs and confidence scores
+2. **GET /customers/:id/pending-matches** — retrieve the list of pending candidates for review
+3. **POST /customers/:id/pending-matches/:matchId/approve** — approve the match (merges the records atomically via transaction, records false negative feedback for F1 tuning)
+4. **POST /customers/:id/pending-matches/:matchId/reject** — reject the match (confirms distinct individuals)
+
+### Approval Behavior
+
+When a pending match is approved:
+- The new customer's aliases are transferred to the candidate (target)
+- The new customer is soft-deleted with `merged_into` set to the target
+- All remaining pending matches on the source are automatically rejected
+- A `false_negative` MatchFeedback record is created to feed the F1 tuning loop
+- Future GET requests for the source return 301 → target
+
+### Pending Match Schema
+
+```javascript
+pending_matches: [{
+  candidate_id: ObjectId,  // Reference to the potential match
+  confidence: Number,      // Fellegi-Sunter score (0.70 – 0.95)
+  algorithm: String,       // "fellegi-sunter"
+  status: String,          // "pending" | "approved" | "rejected"
+  reviewed_by: String,     // x-user-id of the reviewer
+  reviewed_at: Date        // When the review decision was made
+}]
+```
+
+### Thresholds
+
+| Threshold | Value | Meaning |
+|-----------|-------|---------|
+| `MATCH_THRESHOLD` | 0.95 | Auto-approve — records are merged automatically |
+| `REVIEW_THRESHOLD` | 0.70 | Near-miss floor — candidates below this are discarded |
+
+Both thresholds are tunable. The `MATCH_THRESHOLD` is adjusted by the F1 feedback loop based on false positive/negative reports.
 
 ---
 
@@ -447,7 +511,7 @@ Because the alias array, change history, and search tokens all live on the Custo
 
 ### Multi-Document Transactions
 
-The **merge operation** (`PATCH /customers/:id`) is the one endpoint that modifies multiple documents in a single request:
+Two operations modify multiple documents atomically and use MongoDB transactions: the **manual merge** (`PATCH /customers/:id`) and the **pending match approval** (`POST /customers/:id/pending-matches/:matchId/approve`). Both follow the same three-document pattern:
 
 1. **Target customer** — receives transferred aliases, updated search tokens, and a merge audit entry
 2. **Source customer** — marked as soft-deleted with `merged_into` pointer and a merge audit entry
@@ -511,6 +575,7 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 | `aliases` | Array | Cross-system identity links (see below) |
 | `change_history` | Array | Audit trail entries |
 | `search_tokens` | Array\<String\> | Phonetic/exact tokens for candidate blocking (not exposed in API responses) |
+| `pending_matches` | Array | Near-miss match candidates awaiting review (see [Pending Match Review](#near-miss-candidates-and-pending-match-review)) |
 | `created_by` | String | User who created the record |
 | `created_at` | Date | Creation timestamp |
 | `updated_by` | String | Last user to modify the record |
@@ -570,7 +635,7 @@ npm run build
 
 Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
 
-Current status: **289 tests across 13 test suites.**
+Current status: **309 tests across 13 test suites.**
 
 ---
 

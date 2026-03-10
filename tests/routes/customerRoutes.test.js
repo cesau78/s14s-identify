@@ -1330,7 +1330,7 @@ describe('Pending match approve/reject', () => {
       aliases: [{
         source_system: 'ERP',
         source_key: 'ERP-001',
-        original_payload: {},
+        original_payload: { first_name: 'Jonathan', last_name: 'Doe', email: 'jonathan@other.com' },
         added_by: 'tester',
         added_at: new Date(),
         match_confidence: null,
