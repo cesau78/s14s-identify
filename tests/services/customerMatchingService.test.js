@@ -342,6 +342,16 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
       const result = await findMatch(mockModel, incoming);
       expect(result.match).toBe(exactMatch);
       expect(result.nearMisses).toEqual([]);
+      expect(result.searchTokens).toBeDefined();
+      expect(Array.isArray(result.searchTokens)).toBe(true);
+    });
+
+    test('returns searchTokens used for candidate blocking', async () => {
+      const mockModel = { find: jest.fn().mockResolvedValue([]) };
+      const incoming = { first_name: 'John', last_name: 'Doe', email: 'john@example.com' };
+      const result = await findMatch(mockModel, incoming);
+      expect(result.searchTokens).toBeDefined();
+      expect(result.searchTokens.length).toBeGreaterThan(0);
     });
 
     test('returns empty nearMisses when no candidates score above REVIEW_THRESHOLD', async () => {

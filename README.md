@@ -17,7 +17,7 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
   - [Metrics](#metrics)
   - [Weight Tuning](#weight-tuning)
   - [Review Queue](#review-queue)
-- [Near-Miss Candidates and Pending Match Review](#near-miss-candidates-and-pending-match-review)
+- [Near-Miss Candidates and Candidate Review](#near-miss-candidates-and-candidate-review)
 - [Nickname Normalization](#nickname-normalization)
 - [Typeahead Search](#typeahead-search)
 - [Search Tokens and Candidate Blocking](#search-tokens-and-candidate-blocking)
@@ -77,9 +77,9 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 | `GET` | `/customers/:id/aliases` | Get cross-system identity links |
 | `GET` | `/customers/:id/changes` | Get change history |
 | `POST` | `/customers/:id/aliases/:aliasId/feedback` | Report a false positive match |
-| `GET` | `/customers/:id/pending-matches` | Get near-miss match candidates |
-| `POST` | `/customers/:id/pending-matches/:matchId/approve` | Approve a pending match (merges records) |
-| `POST` | `/customers/:id/pending-matches/:matchId/reject` | Reject a pending match |
+| `GET` | `/customers/:id/aliases/:aliasId/candidates` | Get near-miss match candidates for an alias |
+| `POST` | `/customers/:id/aliases/:aliasId/candidates/:candidateId/approve` | Approve a candidate (merges records) |
+| `POST` | `/customers/:id/aliases/:aliasId/candidates/:candidateId/reject` | Reject a candidate |
 | `GET` | `/match-quality` | F1 score, precision, and recall metrics |
 | `GET` | `/match-quality/tune` | Suggested weight adjustments based on feedback |
 | `GET` | `/match-quality/feedback` | List match feedback records |
@@ -89,8 +89,8 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 The `POST /customers` endpoint does not blindly create records. It runs every incoming record through the Fellegi-Sunter matching algorithm against all existing customers:
 
 - **Score >= auto-approve threshold (currently 95% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
-- **Score >= review threshold (70%) but < auto-approve** — a new customer record is created, and the near-miss candidates are attached as `pending_matches` for [manual review](#near-miss-candidates-and-pending-match-review). The API returns `201` with the pending matches included.
-- **Score < review threshold** — a new customer record is created with no pending matches. The API returns `201`.
+- **Score >= review threshold (70%) but < auto-approve** — a new customer record is created, and the near-miss candidates are attached to the alias as `candidates` for [manual review](#near-miss-candidates-and-candidate-review). The API returns `201` with the candidates included.
+- **Score < review threshold** — a new customer record is created with no candidates. The API returns `201`.
 
 This means source systems can POST freely without worrying about duplicates. The matching engine handles deduplication automatically. First names are [normalized from nicknames to formal equivalents](#nickname-normalization) before matching (e.g., "Chuck" becomes "Charles"), while the original name is preserved in the alias's `original_payload`.
 
@@ -125,9 +125,9 @@ graph TD
     L2 --> M;
 
     subgraph Review Workflow
-        PM[GET /:id/pending-matches] --> RV{Reviewer Decision};
-        RV -- Approve --> AP[POST /.../approve → Merge Records];
-        RV -- Reject --> RJ[POST /.../reject → Confirm Distinct];
+        PM[GET /:id/aliases/:aliasId/candidates] --> RV{Reviewer Decision};
+        RV -- Approve --> AP[POST /.../candidates/:id/approve → Merge];
+        RV -- Reject --> RJ[POST /.../candidates/:id/reject → Distinct];
         AP --> FB2[Record false_negative feedback];
     end
 
@@ -150,8 +150,8 @@ graph TD
 4.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
 5.  **Decision**: Three-tier outcome based on score:
     - **>= auto-approve** (0.95): alias linked automatically (200)
-    - **>= review threshold** (0.70): new record created with `pending_matches` for manual review (201)
-    - **< review threshold**: new record created, no pending matches (201)
+    - **>= review threshold** (0.70): new record created with `candidates` on the alias for manual review (201)
+    - **< review threshold**: new record created, no candidates (201)
 6.  **Review Workflow**: Pending matches can be approved (triggering a merge) or rejected (confirming distinct records). Approvals feed the F1 loop as false negatives.
 7.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
 
@@ -264,37 +264,43 @@ Feedback records can be filtered via `GET /match-quality/feedback?resolved=false
 
 ---
 
-## Near-Miss Candidates and Pending Match Review
+## Near-Miss Candidates and Candidate Review
 
-When a new record is created (201 response), the system also evaluates all candidates that scored above the **review threshold** (0.70) but below the **auto-approve threshold** (currently 0.95, tuned by the F1 feedback loop). These "near-miss" candidates are stored as `pending_matches` on the new customer record and included in the 201 response.
+When a new record is created (201 response), the system also evaluates all candidates that scored above the **review threshold** (0.70) but below the **auto-approve threshold** (currently 0.95, tuned by the F1 feedback loop). These "near-miss" candidates are stored as `candidates` on the alias that triggered the record creation and included in the 201 response.
+
+Candidates are children of alias records, not customer records — each alias represents a specific ingestion event, and the candidates are the near-miss matches for that event.
 
 This enables a targeted review workflow:
 
-1. **POST /customers** — if no auto-match, the 201 response includes a `pending_matches` array with candidate IDs and confidence scores
-2. **GET /customers/:id/pending-matches** — retrieve the list of pending candidates for review
-3. **POST /customers/:id/pending-matches/:matchId/approve** — approve the match (merges the records atomically via transaction, records false negative feedback for F1 tuning)
-4. **POST /customers/:id/pending-matches/:matchId/reject** — reject the match (confirms distinct individuals)
+1. **POST /customers** — if no auto-match, the 201 response includes a `candidates` array with candidate IDs and confidence scores
+2. **GET /customers/:id/aliases/:aliasId/candidates** — retrieve the list of candidates for review
+3. **POST /customers/:id/aliases/:aliasId/candidates/:candidateId/approve** — approve the match (merges the records atomically via transaction, records false negative feedback for F1 tuning)
+4. **POST /customers/:id/aliases/:aliasId/candidates/:candidateId/reject** — reject the match (confirms distinct individuals)
 
 ### Approval Behavior
 
-When a pending match is approved:
+When a candidate is approved:
 - The new customer's aliases are transferred to the candidate (target)
 - The new customer is soft-deleted with `merged_into` set to the target
-- All remaining pending matches on the source are automatically rejected
+- All remaining candidates on the alias are automatically rejected
 - A `false_negative` MatchFeedback record is created to feed the F1 tuning loop
 - Future GET requests for the source return 301 → target
 
-### Pending Match Schema
+### Candidate Schema
+
+Defined in `src/models/candidate.js` and embedded within the Alias schema:
 
 ```javascript
-pending_matches: [{
+// Alias.candidates[]
+{
   candidate_id: ObjectId,  // Reference to the potential match
   confidence: Number,      // Fellegi-Sunter score (0.70 – 0.95)
   algorithm: String,       // "fellegi-sunter"
+  search_tokens: [String], // Tokens used for candidate blocking (analysis/audit)
   status: String,          // "pending" | "approved" | "rejected"
   reviewed_by: String,     // x-user-id of the reviewer
   reviewed_at: Date        // When the review decision was made
-}]
+}
 ```
 
 ### Thresholds
@@ -511,7 +517,7 @@ Because the alias array, change history, and search tokens all live on the Custo
 
 ### Multi-Document Transactions
 
-Two operations modify multiple documents atomically and use MongoDB transactions: the **manual merge** (`PATCH /customers/:id`) and the **pending match approval** (`POST /customers/:id/pending-matches/:matchId/approve`). Both follow the same three-document pattern:
+Two operations modify multiple documents atomically and use MongoDB transactions: the **manual merge** (`PATCH /customers/:id`) and the **candidate approval** (`POST /customers/:id/aliases/:aliasId/candidates/:candidateId/approve`). Both follow the same three-document pattern:
 
 1. **Target customer** — receives transferred aliases, updated search tokens, and a merge audit entry
 2. **Source customer** — marked as soft-deleted with `merged_into` pointer and a merge audit entry
@@ -575,7 +581,6 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 | `aliases` | Array | Cross-system identity links (see below) |
 | `change_history` | Array | Audit trail entries |
 | `search_tokens` | Array\<String\> | Phonetic/exact tokens for candidate blocking (not exposed in API responses) |
-| `pending_matches` | Array | Near-miss match candidates awaiting review (see [Pending Match Review](#near-miss-candidates-and-pending-match-review)) |
 | `created_by` | String | User who created the record |
 | `created_at` | Date | Creation timestamp |
 | `updated_by` | String | Last user to modify the record |
@@ -595,6 +600,7 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 | `added_at` | Date | When the alias was linked |
 | `match_confidence` | Number | Fellegi-Sunter score (0–1) when matched; null for record creation |
 | `match_algorithm` | String | Algorithm used (e.g., `fellegi-sunter`); null for record creation |
+| `candidates` | Array | Near-miss match candidates for this alias (see [Candidate Review](#near-miss-candidates-and-candidate-review)) |
 
 ### MatchFeedback
 
@@ -635,7 +641,7 @@ npm run build
 
 Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
 
-Current status: **309 tests across 13 test suites.**
+Current status: **313 tests across 13 test suites.**
 
 ---
 
@@ -650,7 +656,8 @@ src/
   middleware/
     auditContext.js                Extracts x-user-id header for audit tracking
   models/
-    alias.js                      Alias subdocument schema
+    alias.js                      Alias subdocument schema (embeds candidates)
+    candidate.js                  Candidate subdocument schema (near-miss matches)
     changeRecord.js               Change record subdocument schema
     customer.js                   Mongoose schema and indexes
     matchFeedback.js              F1 feedback records (false positives/negatives)

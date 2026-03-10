@@ -1239,8 +1239,8 @@ describe('GET /customers/search', () => {
   });
 });
 
-describe('Pending matches', () => {
-  test('POST returns pending_matches when near-miss candidates exist', async () => {
+describe('Candidates', () => {
+  test('POST returns candidates when near-miss candidates exist', async () => {
     // Create an existing customer
     await request(app)
       .post('/customers')
@@ -1262,54 +1262,75 @@ describe('Pending matches', () => {
       });
 
     // Should create a new record (not auto-matched)
-    if (res.status === 201 && res.body.pending_matches) {
-      expect(res.body.pending_matches.length).toBeGreaterThan(0);
-      expect(res.body.pending_matches[0]).toHaveProperty('candidate_id');
-      expect(res.body.pending_matches[0]).toHaveProperty('confidence');
-      expect(res.body.pending_matches[0]).toHaveProperty('status', 'pending');
-      expect(res.body.pending_matches[0]).toHaveProperty('algorithm', 'fellegi-sunter');
+    if (res.status === 201 && res.body.candidates) {
+      expect(res.body.candidates.length).toBeGreaterThan(0);
+      expect(res.body.candidates[0]).toHaveProperty('candidate_id');
+      expect(res.body.candidates[0]).toHaveProperty('confidence');
+      expect(res.body.candidates[0]).toHaveProperty('status', 'pending');
+      expect(res.body.candidates[0]).toHaveProperty('algorithm', 'fellegi-sunter');
+      expect(res.body.candidates[0]).toHaveProperty('search_tokens');
+      expect(Array.isArray(res.body.candidates[0].search_tokens)).toBe(true);
+      expect(res.body.candidates[0].search_tokens.length).toBeGreaterThan(0);
     }
   });
 
-  test('POST does not include pending_matches when no near-misses', async () => {
+  test('POST does not include candidates when no near-misses', async () => {
     const res = await request(app)
       .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
     expect(res.status).toBe(201);
-    expect(res.body.pending_matches).toBeUndefined();
+    expect(res.body.candidates).toBeUndefined();
   });
 
-  test('GET pending-matches returns pending matches for a customer', async () => {
+  test('GET candidates returns candidates for an alias', async () => {
     const createRes = await request(app)
       .post('/customers')
       .set('x-user-id', 'tester')
       .send(validCustomerPayload);
 
+    // Get the alias ID
+    const Customer = require('../../src/models/customer');
+    const customer = await Customer.findById(createRes.body._id);
+    const aliasId = customer.aliases[0]._id.toString();
+
     const res = await request(app)
-      .get(`/customers/${createRes.body._id}/pending-matches`);
+      .get(`/customers/${createRes.body._id}/aliases/${aliasId}/candidates`);
 
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
   });
 
-  test('GET pending-matches returns 404 for nonexistent customer', async () => {
+  test('GET candidates returns 404 for nonexistent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).get(`/customers/${fakeId}/pending-matches`);
+    const fakeAliasId = new mongoose.Types.ObjectId();
+    const res = await request(app).get(`/customers/${fakeId}/aliases/${fakeAliasId}/candidates`);
     expect(res.status).toBe(404);
   });
 
-  test('GET pending-matches returns 404 for invalid id', async () => {
-    const res = await request(app).get('/customers/not-a-valid-id/pending-matches');
+  test('GET candidates returns 404 for nonexistent alias', async () => {
+    const createRes = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const fakeAliasId = new mongoose.Types.ObjectId();
+    const res = await request(app).get(`/customers/${createRes.body._id}/aliases/${fakeAliasId}/candidates`);
+    expect(res.status).toBe(404);
+  });
+
+  test('GET candidates returns 404 for invalid id', async () => {
+    const res = await request(app).get('/customers/not-a-valid-id/aliases/also-invalid/candidates');
     expect(res.status).toBe(404);
   });
 });
 
-describe('Pending match approve/reject', () => {
+describe('Candidate approve/reject', () => {
   let existingCustomerId;
   let newCustomerId;
-  let pendingMatchId;
+  let aliasId;
+  let candidateId;
 
   beforeEach(async () => {
     // Create existing customer
@@ -1319,7 +1340,7 @@ describe('Pending match approve/reject', () => {
       .send(validCustomerPayload);
     existingCustomerId = existing.body._id;
 
-    // Directly create a new customer with a pending match pointing to the existing one
+    // Directly create a new customer with a candidate on its alias
     const Customer = require('../../src/models/customer');
     const newCustomer = new Customer({
       first_name: 'Jonathan',
@@ -1334,27 +1355,29 @@ describe('Pending match approve/reject', () => {
         added_by: 'tester',
         added_at: new Date(),
         match_confidence: null,
-        match_algorithm: null
+        match_algorithm: null,
+        candidates: [{
+          candidate_id: existingCustomerId,
+          confidence: 0.85,
+          algorithm: 'fellegi-sunter',
+          status: 'pending',
+          search_tokens: ['fp:jonathan', 'lp:doe']
+        }]
       }],
       change_history: [],
       created_by: 'tester',
       created_at: new Date(),
-      search_tokens: ['fp:jonathan', 'lp:doe'],
-      pending_matches: [{
-        candidate_id: existingCustomerId,
-        confidence: 0.85,
-        algorithm: 'fellegi-sunter',
-        status: 'pending'
-      }]
+      search_tokens: ['fp:jonathan', 'lp:doe']
     });
     await newCustomer.save();
     newCustomerId = newCustomer._id.toString();
-    pendingMatchId = newCustomer.pending_matches[0]._id.toString();
+    aliasId = newCustomer.aliases[0]._id.toString();
+    candidateId = newCustomer.aliases[0].candidates[0]._id.toString();
   });
 
   test('approve merges into candidate and soft-deletes source', async () => {
     const res = await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
 
     expect(res.status).toBe(200);
@@ -1365,13 +1388,13 @@ describe('Pending match approve/reject', () => {
     const source = await Customer.findById(newCustomerId);
     expect(source.deleted_at).not.toBeNull();
     expect(source.merged_into.toString()).toBe(existingCustomerId);
-    expect(source.pending_matches[0].status).toBe('approved');
-    expect(source.pending_matches[0].reviewed_by).toBe('reviewer');
+    expect(source.aliases[0].candidates[0].status).toBe('approved');
+    expect(source.aliases[0].candidates[0].reviewed_by).toBe('reviewer');
   });
 
   test('approve transfers aliases to target', async () => {
     await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
 
     const Customer = require('../../src/models/customer');
@@ -1385,48 +1408,56 @@ describe('Pending match approve/reject', () => {
   test('approve returns 404 for nonexistent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .post(`/customers/${fakeId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${fakeId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
     expect(res.status).toBe(404);
   });
 
-  test('approve returns 404 for nonexistent pending match', async () => {
-    const fakeMatchId = new mongoose.Types.ObjectId();
+  test('approve returns 404 for nonexistent alias', async () => {
+    const fakeAliasId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${fakeMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${fakeAliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
     expect(res.status).toBe(404);
   });
 
-  test('approve returns 400 for already approved match', async () => {
+  test('approve returns 404 for nonexistent candidate', async () => {
+    const fakeCandidateId = new mongoose.Types.ObjectId();
+    const res = await request(app)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${fakeCandidateId}/approve`)
+      .set('x-user-id', 'reviewer');
+    expect(res.status).toBe(404);
+  });
+
+  test('approve returns 400 for already approved candidate', async () => {
     await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
 
     // Try to approve again — customer is now deleted, should 404
     const res = await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
     expect(res.status).toBe(404);
   });
 
-  test('reject marks pending match as rejected', async () => {
+  test('reject marks candidate as rejected', async () => {
     const res = await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/reject`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/reject`)
       .set('x-user-id', 'reviewer');
 
     expect(res.status).toBe(200);
-    expect(res.body.pending_match.status).toBe('rejected');
-    expect(res.body.pending_match.reviewed_by).toBe('reviewer');
+    expect(res.body.candidate.status).toBe('rejected');
+    expect(res.body.candidate.reviewed_by).toBe('reviewer');
   });
 
-  test('reject returns 400 for already rejected match', async () => {
+  test('reject returns 400 for already rejected candidate', async () => {
     await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/reject`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/reject`)
       .set('x-user-id', 'reviewer');
 
     const res = await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/reject`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/reject`)
       .set('x-user-id', 'reviewer');
     expect(res.status).toBe(400);
   });
@@ -1434,31 +1465,39 @@ describe('Pending match approve/reject', () => {
   test('reject returns 404 for nonexistent customer', async () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
-      .post(`/customers/${fakeId}/pending-matches/${pendingMatchId}/reject`)
+      .post(`/customers/${fakeId}/aliases/${aliasId}/candidates/${candidateId}/reject`)
       .set('x-user-id', 'reviewer');
     expect(res.status).toBe(404);
   });
 
-  test('approve rejects remaining pending matches', async () => {
-    // Add a second pending match
+  test('reject returns 404 for nonexistent alias', async () => {
+    const fakeAliasId = new mongoose.Types.ObjectId();
+    const res = await request(app)
+      .post(`/customers/${newCustomerId}/aliases/${fakeAliasId}/candidates/${candidateId}/reject`)
+      .set('x-user-id', 'reviewer');
+    expect(res.status).toBe(404);
+  });
+
+  test('approve rejects remaining candidates', async () => {
+    // Add a second candidate to the alias
     const Customer = require('../../src/models/customer');
     const customer = await Customer.findById(newCustomerId);
-    const secondCandidateId = new mongoose.Types.ObjectId();
-    customer.pending_matches.push({
-      candidate_id: secondCandidateId,
+    const secondCandidateCustomerId = new mongoose.Types.ObjectId();
+    customer.aliases[0].candidates.push({
+      candidate_id: secondCandidateCustomerId,
       confidence: 0.75,
       algorithm: 'fellegi-sunter',
       status: 'pending'
     });
     await customer.save();
-    const secondMatchId = customer.pending_matches[1]._id.toString();
+    const secondCandidateId = customer.aliases[0].candidates[1]._id.toString();
 
     await request(app)
-      .post(`/customers/${newCustomerId}/pending-matches/${pendingMatchId}/approve`)
+      .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
 
     const updated = await Customer.findById(newCustomerId);
-    const second = updated.pending_matches.find(pm => pm._id.toString() === secondMatchId);
+    const second = updated.aliases[0].candidates.find(c => c._id.toString() === secondCandidateId);
     expect(second.status).toBe('rejected');
     expect(second.reviewed_by).toBe('reviewer');
   });

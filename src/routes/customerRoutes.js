@@ -5,7 +5,7 @@ const MatchFeedback = require('../models/matchFeedback');
 const { findMatch } = require('../services/customerMatchingService');
 const { computeDelta, CUSTOMER_AUDITABLE_FIELDS } = require('../services/auditDelta');
 const { sanitizeCustomerInput, sanitizeCustomerUpdate } = require('../services/inputSanitizer');
-const { generateSearchTokens, generateSearchQueryTokens } = require('../services/searchTokenService');
+const { generateSearchQueryTokens } = require('../services/searchTokenService');
 
 const router = express.Router();
 
@@ -296,7 +296,7 @@ router.post('/', async (req, res) => {
 
     const { source_system, source_key, ...customerFields } = sanitized;
 
-    const { match, confidence, nearMisses } = await findMatch(Customer, customerFields);
+    const { match, confidence, nearMisses, searchTokens } = await findMatch(Customer, customerFields);
 
     if (match) {
       match.aliases.push({
@@ -321,11 +321,12 @@ router.post('/', async (req, res) => {
     }
 
     const now = new Date();
-    const pendingMatches = nearMisses.map(nm => ({
+    const candidates = nearMisses.map(nm => ({
       candidate_id: nm.candidate._id,
       confidence: nm.confidence,
       algorithm: 'fellegi-sunter',
-      status: 'pending'
+      status: 'pending',
+      search_tokens: searchTokens
     }));
 
     const customer = new Customer({
@@ -337,19 +338,18 @@ router.post('/', async (req, res) => {
         added_by: req.audit_user,
         added_at: now,
         match_confidence: null,
-        match_algorithm: null
+        match_algorithm: null,
+        candidates
       }],
       change_history: [],
       created_by: req.audit_user,
       created_at: now,
-      search_tokens: generateSearchTokens(customerFields),
-      pending_matches: pendingMatches
     });
 
     await customer.save();
     const response = customerResponse(customer);
-    if (pendingMatches.length > 0) {
-      response.pending_matches = customer.pending_matches;
+    if (candidates.length > 0) {
+      response.candidates = customer.aliases[0].candidates;
     }
     return res.status(201).json(response);
   } catch (error) {
@@ -740,14 +740,6 @@ router.put('/:id', async (req, res) => {
     customer.updated_by = req.audit_user;
     customer.updated_at = new Date();
 
-    customer.search_tokens = generateSearchTokens({
-      first_name: customer.first_name,
-      last_name: customer.last_name,
-      email: customer.email,
-      phone: customer.phone,
-      address: customer.toObject().address
-    });
-
     await customer.save();
     return res.status(200).json(customerResponse(customer));
   } catch (error) {
@@ -859,14 +851,6 @@ router.patch('/:id', async (req, res) => {
           aliases_transferred: source.aliases.length
         }
       }
-    });
-
-    target.search_tokens = generateSearchTokens({
-      first_name: target.first_name,
-      last_name: target.last_name,
-      email: target.email,
-      phone: target.phone,
-      address: target.toObject().address
     });
 
     // Mark source as merged and soft-deleted
@@ -1111,12 +1095,13 @@ router.post('/:id/aliases/:aliasId/feedback', async (req, res) => {
 
 /**
  * @swagger
- * /customers/{id}/pending-matches:
+ * /customers/{id}/aliases/{aliasId}/candidates:
  *   get:
- *     summary: Get pending match candidates for a customer
+ *     summary: Get match candidates for an alias
  *     description: >
- *       Returns all near-miss match candidates that scored above the review threshold
- *       but below the auto-approve threshold. These require manual review.
+ *       Returns all near-miss match candidates for a specific alias. These are
+ *       records that scored above the review threshold but below the auto-approve
+ *       threshold and require manual review.
  *     tags: [Customers]
  *     parameters:
  *       - in: path
@@ -1124,19 +1109,28 @@ router.post('/:id/aliases/:aliasId/feedback', async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
+ *       - in: path
+ *         name: aliasId
+ *         required: true
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
- *         description: Array of pending match candidates
+ *         description: Array of match candidates
  *       404:
- *         description: Customer not found
+ *         description: Customer or alias not found
  */
-router.get('/:id/pending-matches', async (req, res) => {
+router.get('/:id/aliases/:aliasId/candidates', async (req, res) => {
   try {
     const customer = await Customer.findOne({ _id: req.params.id, deleted_at: null });
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    return res.status(200).json(customer.pending_matches || []);
+    const alias = customer.aliases.id(req.params.aliasId);
+    if (!alias) {
+      return res.status(404).json({ error: 'Alias not found' });
+    }
+    return res.status(200).json(alias.candidates || []);
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });
@@ -1147,9 +1141,9 @@ router.get('/:id/pending-matches', async (req, res) => {
 
 /**
  * @swagger
- * /customers/{id}/pending-matches/{matchId}/approve:
+ * /customers/{id}/aliases/{aliasId}/candidates/{candidateId}/approve:
  *   post:
- *     summary: Approve a pending match candidate
+ *     summary: Approve a match candidate
  *     description: >
  *       Approves a near-miss match, merging the current customer into the candidate.
  *       The current customer's aliases are transferred to the candidate, and the
@@ -1161,13 +1155,19 @@ router.get('/:id/pending-matches', async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
- *         description: Customer ID (the newly created record with pending matches)
+ *         description: Customer ID (the newly created record with candidates)
  *       - in: path
- *         name: matchId
+ *         name: aliasId
  *         required: true
  *         schema:
  *           type: string
- *         description: Pending match subdocument ID
+ *         description: Alias subdocument ID
+ *       - in: path
+ *         name: candidateId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Candidate subdocument ID
  *       - in: header
  *         name: x-user-id
  *         schema:
@@ -1177,36 +1177,55 @@ router.get('/:id/pending-matches', async (req, res) => {
  *       200:
  *         description: Match approved. Returns the target (surviving) customer.
  *       404:
- *         description: Customer or pending match not found
+ *         description: Customer, alias, or candidate not found
  *       400:
- *         description: Pending match is not in pending status
+ *         description: Candidate is not in pending status
  */
-router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
+router.post('/:id/aliases/:aliasId/candidates/:candidateId/approve', async (req, res) => {
   try {
     const source = await Customer.findOne({ _id: req.params.id, deleted_at: null });
     if (!source) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    const pendingMatch = source.pending_matches.id(req.params.matchId);
-    if (!pendingMatch) {
-      return res.status(404).json({ error: 'Pending match not found' });
+    const alias = source.aliases.id(req.params.aliasId);
+    if (!alias) {
+      return res.status(404).json({ error: 'Alias not found' });
     }
 
-    if (pendingMatch.status !== 'pending') {
-      return res.status(400).json({ error: `Pending match already ${pendingMatch.status}` });
+    const candidate = alias.candidates.id(req.params.candidateId);
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found' });
     }
 
-    const target = await Customer.findOne({ _id: pendingMatch.candidate_id, deleted_at: null });
+    if (candidate.status !== 'pending') {
+      return res.status(400).json({ error: `Candidate already ${candidate.status}` });
+    }
+
+    const target = await Customer.findOne({ _id: candidate.candidate_id, deleted_at: null });
     if (!target) {
       return res.status(404).json({ error: 'Candidate customer no longer exists' });
     }
 
     const now = new Date();
 
+    // Mark candidate as approved before transferring aliases
+    candidate.status = 'approved';
+    candidate.reviewed_by = req.audit_user;
+    candidate.reviewed_at = now;
+
+    // Reject remaining candidates on this alias
+    for (const c of alias.candidates) {
+      if (c.status === 'pending' && c._id.toString() !== candidate._id.toString()) {
+        c.status = 'rejected';
+        c.reviewed_by = req.audit_user;
+        c.reviewed_at = now;
+      }
+    }
+
     // Transfer aliases from source to target
-    for (const alias of source.aliases) {
-      target.aliases.push(alias);
+    for (const a of source.aliases) {
+      target.aliases.push(a);
     }
 
     target.updated_by = req.audit_user;
@@ -1219,32 +1238,10 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
           action: 'merged',
           source_id: source._id,
           aliases_transferred: source.aliases.length,
-          trigger: 'pending_match_approved'
+          trigger: 'candidate_approved'
         }
       }
     });
-
-    target.search_tokens = generateSearchTokens({
-      first_name: target.first_name,
-      last_name: target.last_name,
-      email: target.email,
-      phone: target.phone,
-      address: target.toObject().address
-    });
-
-    // Mark pending match as approved
-    pendingMatch.status = 'approved';
-    pendingMatch.reviewed_by = req.audit_user;
-    pendingMatch.reviewed_at = now;
-
-    // Reject remaining pending matches
-    for (const pm of source.pending_matches) {
-      if (pm.status === 'pending' && pm._id.toString() !== pendingMatch._id.toString()) {
-        pm.status = 'rejected';
-        pm.reviewed_by = req.audit_user;
-        pm.reviewed_at = now;
-      }
-    }
 
     // Soft-delete source and set merged_into
     source.merged_into = target._id;
@@ -1257,7 +1254,7 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
         merge: {
           action: 'merged_into',
           target_id: target._id,
-          trigger: 'pending_match_approved'
+          trigger: 'candidate_approved'
         }
       }
     });
@@ -1267,13 +1264,13 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
       type: 'false_negative',
       customer_id: target._id,
       related_customer_id: source._id,
-      original_confidence: pendingMatch.confidence,
-      original_algorithm: pendingMatch.algorithm,
+      original_confidence: candidate.confidence,
+      original_algorithm: candidate.algorithm,
       reported_by: req.audit_user,
       reported_at: now,
       resolved: true,
       resolved_at: now,
-      notes: 'Approved from pending match review'
+      notes: 'Approved from candidate review'
     });
 
     const session = await mongoose.startSession();
@@ -1298,9 +1295,9 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
 
 /**
  * @swagger
- * /customers/{id}/pending-matches/{matchId}/reject:
+ * /customers/{id}/aliases/{aliasId}/candidates/{candidateId}/reject:
  *   post:
- *     summary: Reject a pending match candidate
+ *     summary: Reject a match candidate
  *     description: >
  *       Rejects a near-miss match, confirming the records are distinct individuals.
  *     tags: [Customers]
@@ -1311,7 +1308,12 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
  *         schema:
  *           type: string
  *       - in: path
- *         name: matchId
+ *         name: aliasId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: candidateId
  *         required: true
  *         schema:
  *           type: string
@@ -1330,34 +1332,39 @@ router.post('/:id/pending-matches/:matchId/approve', async (req, res) => {
  *                 description: Optional reason for rejection
  *     responses:
  *       200:
- *         description: Match rejected
+ *         description: Candidate rejected
  *       404:
- *         description: Customer or pending match not found
+ *         description: Customer, alias, or candidate not found
  *       400:
- *         description: Pending match is not in pending status
+ *         description: Candidate is not in pending status
  */
-router.post('/:id/pending-matches/:matchId/reject', async (req, res) => {
+router.post('/:id/aliases/:aliasId/candidates/:candidateId/reject', async (req, res) => {
   try {
     const customer = await Customer.findOne({ _id: req.params.id, deleted_at: null });
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    const pendingMatch = customer.pending_matches.id(req.params.matchId);
-    if (!pendingMatch) {
-      return res.status(404).json({ error: 'Pending match not found' });
+    const alias = customer.aliases.id(req.params.aliasId);
+    if (!alias) {
+      return res.status(404).json({ error: 'Alias not found' });
     }
 
-    if (pendingMatch.status !== 'pending') {
-      return res.status(400).json({ error: `Pending match already ${pendingMatch.status}` });
+    const candidate = alias.candidates.id(req.params.candidateId);
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found' });
     }
 
-    pendingMatch.status = 'rejected';
-    pendingMatch.reviewed_by = req.audit_user;
-    pendingMatch.reviewed_at = new Date();
+    if (candidate.status !== 'pending') {
+      return res.status(400).json({ error: `Candidate already ${candidate.status}` });
+    }
+
+    candidate.status = 'rejected';
+    candidate.reviewed_by = req.audit_user;
+    candidate.reviewed_at = new Date();
 
     await customer.save();
-    return res.status(200).json({ message: 'Pending match rejected', pending_match: pendingMatch });
+    return res.status(200).json({ message: 'Candidate rejected', candidate });
   } catch (error) {
     if (error.name === 'CastError') {
       return res.status(404).json({ error: 'Customer not found' });

@@ -113,8 +113,9 @@ describe('Customer Model', () => {
     expect(customer.search_tokens).toContain('fn:JN');
   });
 
-  test('defaults search_tokens to empty array', async () => {
+  test('auto-generates search_tokens on save', async () => {
     const customer = await Customer.create(validCustomerData);
-    expect(customer.search_tokens).toEqual([]);
+    expect(customer.search_tokens.length).toBeGreaterThan(0);
+    expect(customer.search_tokens).toContain('fn:JN');
   });
 });

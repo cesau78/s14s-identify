@@ -147,7 +147,7 @@ async function findMatch(Customer, incomingData) {
   }
 
   if (bestConfidence >= MATCH_THRESHOLD) {
-    return { match: bestMatch, confidence: bestConfidence, nearMisses: [] };
+    return { match: bestMatch, confidence: bestConfidence, nearMisses: [], searchTokens: tokens };
   }
 
   // Best match didn't meet auto-approve — include it in near-misses if it qualifies
@@ -158,7 +158,7 @@ async function findMatch(Customer, incomingData) {
   // Sort near-misses by confidence descending
   nearMisses.sort((a, b) => b.confidence - a.confidence);
 
-  return { match: null, confidence: bestConfidence, nearMisses };
+  return { match: null, confidence: bestConfidence, nearMisses, searchTokens: tokens };
 }
 
 module.exports = {
