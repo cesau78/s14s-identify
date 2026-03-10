@@ -8,6 +8,7 @@ When different systems (CRM, billing, support, etc.) each maintain their own cus
 
 - [Quick Start](#quick-start)
 - [API Overview](#api-overview)
+- [Source System Registration](#source-system-registration)
 - [Customer Matching](#customer-matching)
   - [Fellegi-Sunter Model](#fellegi-sunter-model)
   - [Jaro-Winkler Distance](#jaro-winkler-distance)
@@ -63,7 +64,19 @@ The Swagger UI is available at `http://localhost:3000/api-docs` once the server 
 
 ## API Overview
 
-All endpoints are served under `/customers`. The `x-user-id` header identifies who is performing the action (used for audit tracking).
+All endpoints are served under `/customers` and `/sources`. The `x-user-id` header identifies who is performing the action (used for audit tracking).
+
+### Sources
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/sources` | Register a new source system |
+| `GET` | `/sources` | List all active sources (`?include_deleted=true` for all) |
+| `GET` | `/sources/:id` | Get a source system by ID |
+| `PUT` | `/sources/:id` | Update a source system |
+| `DELETE` | `/sources/:id` | Soft delete a source system |
+
+### Customers
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -86,8 +99,11 @@ All endpoints are served under `/customers`. The `x-user-id` header identifies w
 
 ### POST Behavior
 
-The `POST /customers` endpoint does not blindly create records. It runs every incoming record through the Fellegi-Sunter matching algorithm against all existing customers:
+The `POST /customers` endpoint does not blindly create records. It first validates that the `source_system` is registered (see [Source System Registration](#source-system-registration)), then checks for source key collisions before running the Fellegi-Sunter matching algorithm:
 
+- **Unregistered source system** — returns `400` if the `source_system` is not registered in the sources collection.
+- **Source key collision with aligned data** — if a record with the same `source_system` + `source_key` already exists and the data aligns (confidence >= review threshold 0.70), the alias payload is updated and the API returns `200`.
+- **Source key collision with misaligned data** — if the existing record's data doesn't align, the API returns `409` with collision details and the confidence score.
 - **Score >= auto-approve threshold (currently 95% confidence)** — the record is identified as an existing person. The incoming data is added as an alias to the matched record, and the API returns `200` with the existing customer.
 - **Score >= review threshold (70%) but < auto-approve** — a new customer record is created, and the near-miss candidates are attached to the alias as `candidates` for [manual review](#near-miss-candidates-and-candidate-review). The API returns `201` with the candidates included.
 - **Score < review threshold** — a new customer record is created with no candidates. The API returns `201`.
@@ -104,7 +120,12 @@ The following diagram illustrates the control flow for the `POST /customers` end
 graph TD
     A[Start: POST /customers request] --> B{Sanitize Input & Validate};
     B -- Validation Fails --> C[Return 400 Bad Request];
-    B -- Validation OK --> N[Normalize Nicknames to Formal Names];
+    B -- Validation OK --> SV{Source System Registered?};
+    SV -- No --> C;
+    SV -- Yes --> SC{Source Key Collision?};
+    SC -- Yes, Aligned --> SCU[Update Alias Payload → 200];
+    SC -- Yes, Misaligned --> SCC[Return 409 Collision];
+    SC -- No --> N[Normalize Nicknames to Formal Names];
     N --> D[Generate Search Tokens];
     D --> E[Query DB for Candidates];
     E --> F{Iterate through Candidates};
@@ -123,6 +144,8 @@ graph TD
     L --> M[End];
     C --> M;
     L2 --> M;
+    SCU --> M;
+    SCC --> M;
 
     subgraph Review Workflow
         PM[GET /:id/aliases/:aliasId/candidates] --> RV{Reviewer Decision};
@@ -145,15 +168,45 @@ graph TD
 ```
 
 1.  **Sanitization**: All incoming data is cleaned, validated, and [nickname-normalized](#nickname-normalization).
-2.  **Token Generation**: Search tokens (phonetic, prefix, exact) are created from the sanitized data.
-3.  **Candidate Blocking**: The database is queried for records sharing at least one token. This is a highly efficient indexed operation (`O(log N)`).
-4.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
-5.  **Decision**: Three-tier outcome based on score:
+2.  **Source Validation**: The `source_system` must be [registered](#source-system-registration) or the request is rejected with 400.
+3.  **Collision Check**: If a record with the same `source_system` + `source_key` already exists, the system uses Fellegi-Sunter to determine if the data aligns (update alias, 200) or conflicts (409 collision).
+4.  **Token Generation**: Search tokens (phonetic, prefix, exact) are created from the sanitized data.
+5.  **Candidate Blocking**: The database is queried for records sharing at least one token. This is a highly efficient indexed operation (`O(log N)`).
+6.  **Scoring**: The small set of candidates (`C`) is scored using the Fellegi-Sunter algorithm.
+7.  **Decision**: Three-tier outcome based on score:
     - **>= auto-approve** (0.95): alias linked automatically (200)
     - **>= review threshold** (0.70): new record created with `candidates` on the alias for manual review (201)
     - **< review threshold**: new record created, no candidates (201)
-6.  **Review Workflow**: Pending matches can be approved (triggering a merge) or rejected (confirming distinct records). Approvals feed the F1 loop as false negatives.
-7.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
+8.  **Review Workflow**: Pending matches can be approved (triggering a merge) or rejected (confirming distinct records). Approvals feed the F1 loop as false negatives.
+9.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
+
+---
+
+## Source System Registration
+
+Before a source system can submit customer records via `POST /customers`, it must be registered using the `/sources` API. This ensures that every alias traces back to a known system and enables access control per source.
+
+### Source Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | String | Unique identifier for the source system (e.g., `CRM`, `BILLING`) |
+| `entra_ad_group` | String | Microsoft Entra AD group name for future access control |
+| `reviewers` | Array | Users authorized to review match candidates from this source |
+| `created_by` | String | User who registered the source |
+| `created_at` | Date | Registration timestamp |
+| `deleted_at` | Date | Soft-deletion timestamp (null if active) |
+
+Each reviewer has `first_name`, `last_name`, and `email` (stored lowercase). The reviewers list is replaced entirely on update, not merged.
+
+### Source Key Uniqueness
+
+The `aliases.source_system + aliases.source_key` compound index is **unique** — a given source system can only have one record per source key across all customers. When a POST arrives with a `source_system` + `source_key` that already exists:
+
+- **Data aligns** (Fellegi-Sunter confidence >= 0.70): the alias's `original_payload` is updated and the existing customer is returned (200).
+- **Data misaligned**: a `409` collision is returned with the existing customer ID and confidence score, indicating the records need manual review or a source-side data correction.
+
+This prevents silent overwrites and duplicate aliases while still allowing source systems to re-submit corrected data.
 
 ---
 
@@ -622,7 +675,7 @@ Attempts to retrieve the deprecated record via `GET /customers/:id` will return 
 
 - `deleted_at` — fast filtering for active/deleted records
 - `email` — candidate lookup during matching
-- `aliases.source_system + aliases.source_key` — compound index for source system lookups
+- `aliases.source_system + aliases.source_key` — **unique** compound index preventing duplicate source keys
 - `search_tokens + deleted_at` — compound multikey index for token-based candidate blocking and typeahead search
 
 ---
@@ -641,7 +694,7 @@ npm run build
 
 Tests use `mongodb-memory-server` for a real MongoDB instance in-memory — no mocking of the database layer. This ensures tests exercise the actual Mongoose queries and validations.
 
-Current status: **313 tests across 13 test suites.**
+Current status: **334 tests across 14 test suites.**
 
 ---
 
@@ -661,9 +714,11 @@ src/
     changeRecord.js               Change record subdocument schema
     customer.js                   Mongoose schema and indexes
     matchFeedback.js              F1 feedback records (false positives/negatives)
+    source.js                     Source system registration schema
   routes/
     customerRoutes.js             REST endpoints (List, CRUD, search, merge, feedback)
     matchQualityRoutes.js         F1 metrics, tuning suggestions, feedback listing
+    sourceRoutes.js               Source system CRUD endpoints
   services/
     auditDelta.js                 Field-level change delta computation
     addressStandardizer.js        USPS Pub 28 address standardization
@@ -688,6 +743,7 @@ tests/
   routes/
     customerRoutes.test.js
     matchQuality.test.js
+    sourceRoutes.test.js
   services/
     addressStandardizer.test.js
     auditDelta.test.js

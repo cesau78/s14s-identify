@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const app = require('../../src/app');
 const Customer = require('../../src/models/customer');
+const Source = require('../../src/models/source');
 
 let mongoServer;
 
@@ -14,6 +15,16 @@ beforeAll(async () => {
 afterAll(async () => {
   await mongoose.disconnect();
   await mongoServer.stop();
+});
+
+beforeEach(async () => {
+  await Source.deleteMany({});
+  await Source.insertMany([
+    { name: 'CRM', created_by: 'test-setup', created_at: new Date() },
+    { name: 'ERP', created_by: 'test-setup', created_at: new Date() },
+    { name: 'NEW', created_by: 'test-setup', created_at: new Date() },
+    { name: 'BILLING', created_by: 'test-setup', created_at: new Date() }
+  ]);
 });
 
 afterEach(async () => {
@@ -169,6 +180,53 @@ describe('POST /customers', () => {
       .send({ ...validCustomerPayload, source_system: 'NEW', source_key: 'NEW-1' });
 
     expect(res.status).toBe(201);
+  });
+
+  test('returns 400 for unregistered source_system', async () => {
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({ ...validCustomerPayload, source_system: 'UNKNOWN' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors[0]).toMatch(/UNKNOWN.*not registered/);
+  });
+
+  test('returns 200 when same source_system+source_key resubmitted with aligned data', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester-2')
+      .send({ ...validCustomerPayload, phone: '(214) 555-9999' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updated_by).toBe('tester-2');
+  });
+
+  test('returns 409 when same source_system+source_key resubmitted with misaligned data', async () => {
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    const res = await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester-2')
+      .send({
+        ...validCustomerPayload,
+        first_name: 'Completely',
+        last_name: 'Different',
+        email: 'different@nowhere.com'
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Source key collision');
+    expect(res.body.existing_customer_id).toBeDefined();
+    expect(res.body.confidence).toBeLessThan(0.70);
   });
 });
 
@@ -1383,13 +1441,18 @@ describe('Candidate approve/reject', () => {
     expect(res.status).toBe(200);
     expect(res.body._id).toBe(existingCustomerId);
 
-    // Source should be soft-deleted and merged
+    // Source should be soft-deleted and merged with aliases cleared
     const Customer = require('../../src/models/customer');
     const source = await Customer.findById(newCustomerId);
     expect(source.deleted_at).not.toBeNull();
     expect(source.merged_into.toString()).toBe(existingCustomerId);
-    expect(source.aliases[0].candidates[0].status).toBe('approved');
-    expect(source.aliases[0].candidates[0].reviewed_by).toBe('reviewer');
+    expect(source.aliases).toHaveLength(0);
+
+    // Candidate status should be on the transferred alias in the target
+    const target = await Customer.findById(existingCustomerId);
+    const transferredAlias = target.aliases.find(a => a.source_system === 'ERP');
+    expect(transferredAlias.candidates[0].status).toBe('approved');
+    expect(transferredAlias.candidates[0].reviewed_by).toBe('reviewer');
   });
 
   test('approve transfers aliases to target', async () => {
@@ -1496,8 +1559,10 @@ describe('Candidate approve/reject', () => {
       .post(`/customers/${newCustomerId}/aliases/${aliasId}/candidates/${candidateId}/approve`)
       .set('x-user-id', 'reviewer');
 
-    const updated = await Customer.findById(newCustomerId);
-    const second = updated.aliases[0].candidates.find(c => c._id.toString() === secondCandidateId);
+    // After merge, aliases are transferred to the target — check there
+    const target = await Customer.findById(existingCustomerId);
+    const transferredAlias = target.aliases.find(a => a.source_system === 'ERP');
+    const second = transferredAlias.candidates.find(c => c._id.toString() === secondCandidateId);
     expect(second.status).toBe('rejected');
     expect(second.reviewed_by).toBe('reviewer');
   });

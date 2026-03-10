@@ -4,6 +4,7 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const app = require('../../src/app');
 const Customer = require('../../src/models/customer');
 const MatchFeedback = require('../../src/models/matchFeedback');
+const Source = require('../../src/models/source');
 
 let mongoServer;
 
@@ -15,6 +16,14 @@ beforeAll(async () => {
 afterAll(async () => {
   await mongoose.disconnect();
   await mongoServer.stop();
+});
+
+beforeEach(async () => {
+  await Source.deleteMany({});
+  await Source.insertMany([
+    { name: 'CRM', created_by: 'test-setup', created_at: new Date() },
+    { name: 'ERP', created_by: 'test-setup', created_at: new Date() }
+  ]);
 });
 
 afterEach(async () => {

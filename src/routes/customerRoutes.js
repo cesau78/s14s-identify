@@ -2,7 +2,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Customer = require('../models/customer');
 const MatchFeedback = require('../models/matchFeedback');
-const { findMatch } = require('../services/customerMatchingService');
+const Source = require('../models/source');
+const { findMatch, calculateFellegiSunterScore, MATCH_THRESHOLD, REVIEW_THRESHOLD } = require('../services/customerMatchingService');
 const { computeDelta, CUSTOMER_AUDITABLE_FIELDS } = require('../services/auditDelta');
 const { sanitizeCustomerInput, sanitizeCustomerUpdate } = require('../services/inputSanitizer');
 const { generateSearchQueryTokens } = require('../services/searchTokenService');
@@ -295,6 +296,50 @@ router.post('/', async (req, res) => {
     }
 
     const { source_system, source_key, ...customerFields } = sanitized;
+
+    // Validate source_system is registered
+    const registeredSource = await Source.findOne({ name: source_system, deleted_at: null });
+    if (!registeredSource) {
+      return res.status(400).json({ errors: [`source_system '${source_system}' is not registered`] });
+    }
+
+    // Check for source_system + source_key collision
+    const existingOwner = await Customer.findOne({
+      'aliases.source_system': source_system,
+      'aliases.source_key': source_key,
+      deleted_at: null
+    });
+
+    if (existingOwner) {
+      const confidence = calculateFellegiSunterScore(customerFields, existingOwner);
+
+      if (confidence >= REVIEW_THRESHOLD) {
+        // Data aligns — update the alias payload and return existing customer
+        const alias = existingOwner.aliases.find(
+          a => a.source_system === source_system && a.source_key === source_key
+        );
+        alias.original_payload = req.body;
+
+        existingOwner.updated_by = req.audit_user;
+        existingOwner.updated_at = new Date();
+        existingOwner.change_history.push({
+          changed_by: req.audit_user,
+          changed_at: new Date(),
+          delta: { aliases: { action: 'updated', source_system, source_key } }
+        });
+
+        await existingOwner.save();
+        return res.status(200).json(customerResponse(existingOwner));
+      }
+
+      // Data does not align — collision requires review
+      return res.status(409).json({
+        error: 'Source key collision',
+        message: `${source_system}/${source_key} is already linked to customer ${existingOwner._id}, but the incoming data does not align (confidence: ${(confidence * 100).toFixed(1)}%). A split may be required.`,
+        existing_customer_id: existingOwner._id,
+        confidence
+      });
+    }
 
     const { match, confidence, nearMisses, searchTokens } = await findMatch(Customer, customerFields);
 
@@ -835,9 +880,12 @@ router.patch('/:id', async (req, res) => {
     const now = new Date();
 
     // Transfer aliases from source to target
+    const aliasCount = source.aliases.length;
     for (const alias of source.aliases) {
       target.aliases.push(alias);
     }
+    // Clear source aliases to avoid unique index conflict on source_system+source_key
+    source.aliases = [];
 
     target.updated_by = req.audit_user;
     target.updated_at = now;
@@ -848,7 +896,7 @@ router.patch('/:id', async (req, res) => {
         merge: {
           action: 'merged',
           source_id: source._id,
-          aliases_transferred: source.aliases.length
+          aliases_transferred: aliasCount
         }
       }
     });
@@ -884,8 +932,9 @@ router.patch('/:id', async (req, res) => {
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
-        await target.save({ session });
+        // Save source first (aliases cleared) to release unique index keys
         await source.save({ session });
+        await target.save({ session });
         await falseNegative.save({ session });
       });
     } finally {
@@ -1224,9 +1273,12 @@ router.post('/:id/aliases/:aliasId/candidates/:candidateId/approve', async (req,
     }
 
     // Transfer aliases from source to target
+    const aliasCount = source.aliases.length;
     for (const a of source.aliases) {
       target.aliases.push(a);
     }
+    // Clear source aliases to avoid unique index conflict on source_system+source_key
+    source.aliases = [];
 
     target.updated_by = req.audit_user;
     target.updated_at = now;
@@ -1237,7 +1289,7 @@ router.post('/:id/aliases/:aliasId/candidates/:candidateId/approve', async (req,
         merge: {
           action: 'merged',
           source_id: source._id,
-          aliases_transferred: source.aliases.length,
+          aliases_transferred: aliasCount,
           trigger: 'candidate_approved'
         }
       }
@@ -1276,8 +1328,9 @@ router.post('/:id/aliases/:aliasId/candidates/:candidateId/approve', async (req,
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
-        await target.save({ session });
+        // Save source first (aliases cleared) to release unique index keys
         await source.save({ session });
+        await target.save({ session });
         await falseNegative.save({ session });
       });
     } finally {

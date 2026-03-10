@@ -104,12 +104,12 @@ describe('Customer Model', () => {
     expect(customer.address.zip).toBe('');
   });
 
-  test('stores search_tokens as array of strings', async () => {
+  test('pre-save hook overrides manually set search_tokens', async () => {
     const customer = await Customer.create({
       ...validCustomerData,
-      search_tokens: ['fn:JN', 'ln:T', 'em:john', 'ed:example.com']
+      search_tokens: ['manual:token']
     });
-    expect(customer.search_tokens).toHaveLength(4);
+    expect(customer.search_tokens).not.toContain('manual:token');
     expect(customer.search_tokens).toContain('fn:JN');
   });
 

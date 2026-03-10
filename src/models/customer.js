@@ -41,7 +41,7 @@ customerSchema.pre('save', function () {
 
 customerSchema.index({ deleted_at: 1 });
 customerSchema.index({ email: 1 });
-customerSchema.index({ 'aliases.source_system': 1, 'aliases.source_key': 1 });
+customerSchema.index({ 'aliases.source_system': 1, 'aliases.source_key': 1 }, { unique: true });
 customerSchema.index({ search_tokens: 1, deleted_at: 1 });
 
 const Customer = mongoose.model('Customer', customerSchema);
