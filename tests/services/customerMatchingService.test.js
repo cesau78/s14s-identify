@@ -142,7 +142,14 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
 
     test('returns high score for matching records with minor name variation', () => {
       const a = { first_name: 'John', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
-      const b = { first_name: 'Jon', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
+      const b = { first_name: 'Johnn', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
+      const score = calculateFellegiSunterScore(a, b);
+      expect(score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+    });
+
+    test('normalizes nicknames to formal names before comparison', () => {
+      const a = { first_name: 'Bill', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
+      const b = { first_name: 'William', last_name: 'Doe', email: 'john@example.com', phone: '555-1234' };
       const score = calculateFellegiSunterScore(a, b);
       expect(score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
     });
@@ -173,8 +180,8 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
   });
 
   describe('MATCH_THRESHOLD', () => {
-    test('threshold is 0.997', () => {
-      expect(MATCH_THRESHOLD).toBe(0.997);
+    test('threshold is 0.95', () => {
+      expect(MATCH_THRESHOLD).toBe(0.95);
     });
   });
 
@@ -376,6 +383,126 @@ describe('Customer Matching Service (Fellegi-Sunter)', () => {
       const result = await findMatch(mockModel, incoming);
       expect(result.match).toBeNull();
       expect(result.nearMisses).toEqual([]);
+    });
+
+    test('demotes previous best to nearMisses when a higher-scoring review-range candidate is found', async () => {
+      // f2 scores ~0.745 (name+phone+address match, different email)
+      const lowerCandidate = {
+        _id: 'lower1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'diff@other.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      // f4 scores ~0.851 (name+email+phone match, different address)
+      const higherCandidate = {
+        _id: 'higher1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '999 Different', city: 'Other', state: 'NY', zip: '10001' }
+      };
+
+      // Order matters: lower candidate is processed first, becomes bestMatch,
+      // then higher candidate displaces it — demoting the lower to nearMisses (line 141)
+      const mockModel = { find: jest.fn().mockResolvedValue([lowerCandidate, higherCandidate]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const lowerScore = calculateFellegiSunterScore(incoming, lowerCandidate);
+      const higherScore = calculateFellegiSunterScore(incoming, higherCandidate);
+
+      // Verify preconditions: both in review range and higher > lower
+      expect(lowerScore).toBeGreaterThanOrEqual(REVIEW_THRESHOLD);
+      expect(lowerScore).toBeLessThan(MATCH_THRESHOLD);
+      expect(higherScore).toBeGreaterThanOrEqual(REVIEW_THRESHOLD);
+      expect(higherScore).toBeLessThan(MATCH_THRESHOLD);
+      expect(higherScore).toBeGreaterThan(lowerScore);
+
+      const result = await findMatch(mockModel, incoming);
+
+      // No auto-match since neither exceeds MATCH_THRESHOLD
+      expect(result.match).toBeNull();
+
+      // The demoted lower candidate should appear in nearMisses
+      const demoted = result.nearMisses.find(nm => nm.candidate._id === 'lower1');
+      expect(demoted).toBeDefined();
+      expect(demoted.confidence).toBeCloseTo(lowerScore, 5);
+
+      // The higher candidate (best but still below MATCH_THRESHOLD) is also in nearMisses
+      const best = result.nearMisses.find(nm => nm.candidate._id === 'higher1');
+      expect(best).toBeDefined();
+      expect(best.confidence).toBeCloseTo(higherScore, 5);
+
+      // Higher should be sorted first
+      expect(result.nearMisses[0].candidate._id).toBe('higher1');
+      expect(result.nearMisses[1].candidate._id).toBe('lower1');
+    });
+
+    test('adds candidate to nearMisses when it scores in review range but below current best', async () => {
+      // f4 scores ~0.851 (name+email+phone match, different address) — processed first, becomes best
+      const bestCandidate = {
+        _id: 'best1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '999 Different', city: 'Other', state: 'NY', zip: '10001' }
+      };
+
+      // f2 scores ~0.745 (name+phone+address match, different email) — processed second, hits else-if (line 146)
+      const reviewCandidate = {
+        _id: 'review1',
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'diff@other.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      // Order matters: best is first so it becomes bestMatch, then review candidate
+      // scores lower and enters the else-if branch (line 145-146)
+      const mockModel = { find: jest.fn().mockResolvedValue([bestCandidate, reviewCandidate]) };
+
+      const incoming = {
+        first_name: 'John',
+        last_name: 'Doe',
+        email: 'john@example.com',
+        phone: '555-1234',
+        address: { street: '123 Main', city: 'Springfield', state: 'IL', zip: '62701' }
+      };
+
+      const bestScore = calculateFellegiSunterScore(incoming, bestCandidate);
+      const reviewScore = calculateFellegiSunterScore(incoming, reviewCandidate);
+
+      // Verify preconditions: both in review range, best > review
+      expect(bestScore).toBeGreaterThanOrEqual(REVIEW_THRESHOLD);
+      expect(bestScore).toBeLessThan(MATCH_THRESHOLD);
+      expect(reviewScore).toBeGreaterThanOrEqual(REVIEW_THRESHOLD);
+      expect(reviewScore).toBeLessThan(MATCH_THRESHOLD);
+      expect(bestScore).toBeGreaterThan(reviewScore);
+
+      const result = await findMatch(mockModel, incoming);
+
+      expect(result.match).toBeNull();
+
+      // The review candidate should be in nearMisses via the else-if path
+      const nearMiss = result.nearMisses.find(nm => nm.candidate._id === 'review1');
+      expect(nearMiss).toBeDefined();
+      expect(nearMiss.confidence).toBeCloseTo(reviewScore, 5);
+
+      // Best candidate also ends up in nearMisses (added at line 156 after the loop)
+      const bestInNearMisses = result.nearMisses.find(nm => nm.candidate._id === 'best1');
+      expect(bestInNearMisses).toBeDefined();
     });
 
     test('sorts nearMisses by confidence descending', async () => {

@@ -92,6 +92,52 @@ describe('POST /sources', () => {
       expect.stringMatching(/email/)
     ]));
   });
+
+  test('returns 400 when POST reviewers have missing fields', async () => {
+    const res = await request(app)
+      .post('/sources')
+      .set('x-user-id', 'admin')
+      .send({
+        name: 'REVIEW-TEST',
+        reviewers: [{ last_name: 'Smith' }]
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/first_name/),
+      expect.stringMatching(/email/)
+    ]));
+  });
+
+  test('returns 400 on ValidationError from Mongoose', async () => {
+    const saveSpy = jest.spyOn(Source.prototype, 'save').mockRejectedValueOnce(
+      Object.assign(new Error('Validation failed'), { name: 'ValidationError' })
+    );
+
+    const res = await request(app)
+      .post('/sources')
+      .set('x-user-id', 'admin')
+      .send({ name: 'VALID' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toContain('Validation failed');
+    saveSpy.mockRestore();
+  });
+
+  test('returns 500 on unexpected error', async () => {
+    const saveSpy = jest.spyOn(Source.prototype, 'save').mockRejectedValueOnce(
+      new Error('Something broke')
+    );
+
+    const res = await request(app)
+      .post('/sources')
+      .set('x-user-id', 'admin')
+      .send({ name: 'VALID' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+    saveSpy.mockRestore();
+  });
 });
 
 describe('GET /sources', () => {
@@ -131,6 +177,18 @@ describe('GET /sources', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
   });
+
+  test('returns 500 on unexpected error', async () => {
+    const findSpy = jest.spyOn(Source, 'find').mockReturnValueOnce({
+      sort: jest.fn().mockRejectedValueOnce(new Error('DB down'))
+    });
+
+    const res = await request(app).get('/sources');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+    findSpy.mockRestore();
+  });
 });
 
 describe('GET /sources/:id', () => {
@@ -159,6 +217,26 @@ describe('GET /sources/:id', () => {
     const res = await request(app).get(`/sources/${source._id}`);
 
     expect(res.status).toBe(404);
+  });
+
+  test('returns 404 for invalid ID (CastError)', async () => {
+    const res = await request(app).get('/sources/not-a-valid-id');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Source not found');
+  });
+
+  test('returns 500 on unexpected error', async () => {
+    const findOneSpy = jest.spyOn(Source, 'findOne').mockRejectedValueOnce(
+      new Error('DB down')
+    );
+
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await request(app).get(`/sources/${fakeId}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+    findOneSpy.mockRestore();
   });
 });
 
@@ -221,6 +299,88 @@ describe('PUT /sources/:id', () => {
 
     expect(res.status).toBe(404);
   });
+
+  test('returns 400 when name is set to empty string', async () => {
+    const source = await Source.create({ name: 'CRM', created_by: 'admin', created_at: new Date() });
+
+    const res = await request(app)
+      .put(`/sources/${source._id}`)
+      .set('x-user-id', 'admin')
+      .send({ name: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toContain('name cannot be empty');
+  });
+
+  test('returns 400 when reviewer is missing required fields', async () => {
+    const source = await Source.create({ name: 'CRM', created_by: 'admin', created_at: new Date() });
+
+    const res = await request(app)
+      .put(`/sources/${source._id}`)
+      .set('x-user-id', 'admin')
+      .send({
+        reviewers: [{ email: 'test@co.com' }]
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/first_name/),
+      expect.stringMatching(/last_name/)
+    ]));
+  });
+
+  test('returns 400 when reviewer is missing email', async () => {
+    const source = await Source.create({ name: 'CRM', created_by: 'admin', created_at: new Date() });
+
+    const res = await request(app)
+      .put(`/sources/${source._id}`)
+      .set('x-user-id', 'admin')
+      .send({
+        reviewers: [{ first_name: 'Bob', last_name: 'Smith' }]
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/email/)
+    ]));
+  });
+
+  test('treats non-array reviewers as empty array on PUT', async () => {
+    const source = await Source.create({ name: 'CRM', created_by: 'admin', created_at: new Date() });
+
+    const res = await request(app)
+      .put(`/sources/${source._id}`)
+      .set('x-user-id', 'admin')
+      .send({ reviewers: 'not-an-array' });
+
+    expect(res.status).toBe(200);
+  });
+
+  test('returns 404 for invalid ID (CastError)', async () => {
+    const res = await request(app)
+      .put('/sources/not-a-valid-id')
+      .set('x-user-id', 'admin')
+      .send({ name: 'X' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Source not found');
+  });
+
+  test('returns 500 on unexpected error', async () => {
+    const findOneSpy = jest.spyOn(Source, 'findOne').mockRejectedValueOnce(
+      new Error('DB down')
+    );
+
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await request(app)
+      .put(`/sources/${fakeId}`)
+      .set('x-user-id', 'admin')
+      .send({ name: 'X' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+    findOneSpy.mockRestore();
+  });
 });
 
 describe('DELETE /sources/:id', () => {
@@ -259,5 +419,29 @@ describe('DELETE /sources/:id', () => {
       .set('x-user-id', 'admin');
 
     expect(res.status).toBe(404);
+  });
+
+  test('returns 404 for invalid ID (CastError)', async () => {
+    const res = await request(app)
+      .delete('/sources/not-a-valid-id')
+      .set('x-user-id', 'admin');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Source not found');
+  });
+
+  test('returns 500 on unexpected error', async () => {
+    const findOneSpy = jest.spyOn(Source, 'findOne').mockRejectedValueOnce(
+      new Error('DB down')
+    );
+
+    const fakeId = new mongoose.Types.ObjectId();
+    const res = await request(app)
+      .delete(`/sources/${fakeId}`)
+      .set('x-user-id', 'admin');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+    findOneSpy.mockRestore();
   });
 });

@@ -9,6 +9,18 @@ const aliasSchema = new mongoose.Schema({
   added_at: { type: Date, required: true, default: Date.now },
   match_confidence: { type: Number, default: null },
   match_algorithm: { type: String, default: null },
+  source_of_truth: { type: Boolean, default: false },
+  effective_date: { type: Date, default: Date.now },
+  first_name: { type: String, default: '' },
+  last_name: { type: String, default: '' },
+  email: { type: String, default: '' },
+  phone: { type: String, default: '' },
+  address: {
+    street: { type: String, default: '' },
+    city: { type: String, default: '' },
+    state: { type: String, default: '' },
+    zip: { type: String, default: '' }
+  },
   candidates: [candidateSchema]
 }, { _id: true });
 

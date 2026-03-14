@@ -1,5 +1,6 @@
 const jaroWinkler = require('jaro-winkler');
 const { generateSearchTokens } = require('./searchTokenService');
+const { toFormalName } = require('./nicknameDictionary');
 
 // Fellegi-Sunter probabilistic record linkage
 //
@@ -86,7 +87,7 @@ function compareField(a, b, config) {
 
 function calculateFellegiSunterScore(incoming, existing) {
   const pairs = [
-    { field: 'first_name', a: normalizeString(incoming.first_name), b: normalizeString(existing.first_name) },
+    { field: 'first_name', a: normalizeString(toFormalName(incoming.first_name)), b: normalizeString(toFormalName(existing.first_name)) },
     { field: 'last_name', a: normalizeString(incoming.last_name), b: normalizeString(existing.last_name) },
     { field: 'email', a: normalizeString(incoming.email), b: normalizeString(existing.email) },
     { field: 'phone', a: normalizeString(incoming.phone), b: normalizeString(existing.phone) },

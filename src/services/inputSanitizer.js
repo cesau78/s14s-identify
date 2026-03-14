@@ -1,6 +1,5 @@
 const { parsePhoneNumberFromString } = require('libphonenumber-js');
 const { standardizeAddress } = require('./addressStandardizer');
-const { toFormalName } = require('./nicknameDictionary');
 
 function sanitizeString(value) {
   if (value === null || value === undefined) return '';
@@ -39,11 +38,13 @@ function sanitizeAddress(address) {
 function sanitizeCustomerInput(body) {
   const errors = [];
 
-  const first_name = toFormalName(sanitizeString(body.first_name));
+  const first_name = sanitizeString(body.first_name);
   const last_name = sanitizeString(body.last_name);
   const email = sanitizeEmail(body.email);
   const source_system = sanitizeString(body.source_system);
   const source_key = sanitizeString(body.source_key);
+  const source_of_truth = body.source_of_truth === true;
+  const effective_date = body.effective_date ? new Date(body.effective_date) : new Date();
 
   if (!source_system || !source_key) {
     errors.push('source_system and source_key are required');
@@ -54,6 +55,9 @@ function sanitizeCustomerInput(body) {
     errors.push('email is required');
   } else if (!isValidEmail(email)) {
     errors.push('email format is invalid');
+  }
+  if (body.effective_date && isNaN(effective_date.getTime())) {
+    errors.push('effective_date is not a valid date');
   }
 
   const phone = normalizePhoneToE164(body.phone);
@@ -72,7 +76,9 @@ function sanitizeCustomerInput(body) {
       phone,
       address,
       source_system,
-      source_key
+      source_key,
+      source_of_truth,
+      effective_date
     }
   };
 }
@@ -82,7 +88,7 @@ function sanitizeCustomerUpdate(body) {
   const sanitized = {};
 
   if (body.first_name !== undefined) {
-    const val = toFormalName(sanitizeString(body.first_name));
+    const val = sanitizeString(body.first_name);
     if (!val) {
       errors.push('first_name cannot be empty');
     } else {

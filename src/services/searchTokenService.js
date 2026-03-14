@@ -1,5 +1,6 @@
 const DoubleMetaphone = require('doublemetaphone');
 const { STREET_SUFFIXES, DIRECTIONALS, SECONDARY_UNITS } = require('./addressStandardizer');
+const { getFormalName } = require('./nicknameDictionary');
 
 const encoder = new DoubleMetaphone();
 
@@ -25,12 +26,18 @@ function prefixTokens(value, prefix, minLen = 2) {
 }
 
 function nameTokens(firstName, lastName) {
-  return [
+  const tokens = [
     ...phoneticTokens(firstName, 'fn:'),
     ...phoneticTokens(lastName, 'ln:'),
     ...prefixTokens(firstName, 'fp:'),
     ...prefixTokens(lastName, 'lp:')
   ];
+  const formal = getFormalName(firstName);
+  if (formal) {
+    tokens.push(...phoneticTokens(formal, 'fn:'));
+    tokens.push(...prefixTokens(formal, 'fp:'));
+  }
+  return tokens;
 }
 
 function emailTokens(email) {
@@ -98,8 +105,6 @@ function generateSearchTokens(data) {
 
   return [...new Set(tokens)];
 }
-
-const { getFormalName } = require('./nicknameDictionary');
 
 function generateSearchQueryTokens(query) {
   if (!query) return [];

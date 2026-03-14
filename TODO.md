@@ -3,7 +3,7 @@
   - add a boolean field to indicate source of truth, which should be used when determining what the resolved (top-level) record should reflect.  Otherwise, the last in should win.
     - add an effective date to both the alias and the customer.  If a requester supplies no effective date, the current date should be supplied.
   - the formal record should relect a merging of alias record where the merging of non-source-of-truth records are then overlaid by the merging of source-of-truth-records the latest source of truth records.  Each post applies a layer.
-    - the requester should always be able to return their specific record by appending source=
+    - the requester should always be able to return their specific record values by appending source=x
 
 - update logic flow diagrams
   - make separate diagrams for POST /customers

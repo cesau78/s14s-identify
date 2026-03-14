@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const aliasSchema = require('./alias');
 const changeRecordSchema = require('./changeRecord');
 const { generateSearchTokens } = require('../services/searchTokenService');
+const { resolveCustomerFields } = require('../services/recordResolutionService');
 
 const customerSchema = new mongoose.Schema({
   first_name: { type: String, required: true },
@@ -22,6 +23,7 @@ const customerSchema = new mongoose.Schema({
   updated_at: { type: Date, default: null },
   deleted_by: { type: String, default: null },
   deleted_at: { type: Date, default: null },
+  effective_date: { type: Date, default: Date.now },
   search_tokens: [{ type: String }],
   merged_into: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null }
 }, {
@@ -30,6 +32,19 @@ const customerSchema = new mongoose.Schema({
 });
 
 customerSchema.pre('save', function () {
+  if (this._needsResolution && this.aliases && this.aliases.length > 0) {
+    const resolved = resolveCustomerFields(this.aliases);
+    /* istanbul ignore next -- resolveCustomerFields always returns non-null for non-empty aliases */
+    if (resolved) {
+      this.first_name = resolved.first_name;
+      this.last_name = resolved.last_name;
+      this.email = resolved.email;
+      this.phone = resolved.phone;
+      this.address = resolved.address;
+      this.effective_date = resolved.effective_date;
+    }
+  }
+
   this.search_tokens = generateSearchTokens({
     first_name: this.first_name,
     last_name: this.last_name,

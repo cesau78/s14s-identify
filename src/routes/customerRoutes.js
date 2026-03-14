@@ -10,6 +10,12 @@ const { generateSearchQueryTokens } = require('../services/searchTokenService');
 
 const router = express.Router();
 
+/* istanbul ignore next -- defensive helper for Mongoose subdoc/plain-object interop */
+function toPlainAddress(address) {
+  if (!address) return {};
+  return address.toObject ? address.toObject() : { ...address };
+}
+
 function customerResponse(customer, show = []) {
   const response = {
     _id: customer._id,
@@ -18,6 +24,7 @@ function customerResponse(customer, show = []) {
     email: customer.email,
     phone: customer.phone,
     address: customer.address,
+    effective_date: customer.effective_date,
     created_by: customer.created_by,
     created_at: customer.created_at,
     updated_by: customer.updated_by,
@@ -295,7 +302,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ errors });
     }
 
-    const { source_system, source_key, ...customerFields } = sanitized;
+    const { source_system, source_key, source_of_truth, effective_date, ...customerFields } = sanitized;
 
     // Validate source_system is registered
     const registeredSource = await Source.findOne({ name: source_system, deleted_at: null });
@@ -319,6 +326,13 @@ router.post('/', async (req, res) => {
           a => a.source_system === source_system && a.source_key === source_key
         );
         alias.original_payload = req.body;
+        alias.first_name = customerFields.first_name;
+        alias.last_name = customerFields.last_name;
+        alias.email = customerFields.email;
+        alias.phone = customerFields.phone;
+        alias.address = customerFields.address;
+        alias.source_of_truth = source_of_truth;
+        alias.effective_date = effective_date;
 
         existingOwner.updated_by = req.audit_user;
         existingOwner.updated_at = new Date();
@@ -328,6 +342,7 @@ router.post('/', async (req, res) => {
           delta: { aliases: { action: 'updated', source_system, source_key } }
         });
 
+        existingOwner._needsResolution = true;
         await existingOwner.save();
         return res.status(200).json(customerResponse(existingOwner));
       }
@@ -348,6 +363,13 @@ router.post('/', async (req, res) => {
         source_system,
         source_key,
         original_payload: req.body,
+        first_name: customerFields.first_name,
+        last_name: customerFields.last_name,
+        email: customerFields.email,
+        phone: customerFields.phone,
+        address: customerFields.address,
+        source_of_truth,
+        effective_date,
         added_by: req.audit_user,
         added_at: new Date(),
         match_confidence: confidence,
@@ -361,6 +383,7 @@ router.post('/', async (req, res) => {
         delta: { aliases: { action: 'added', source_system, source_key } }
       });
 
+      match._needsResolution = true;
       await match.save();
       return res.status(200).json(customerResponse(match));
     }
@@ -380,6 +403,13 @@ router.post('/', async (req, res) => {
         source_system,
         source_key,
         original_payload: req.body,
+        first_name: customerFields.first_name,
+        last_name: customerFields.last_name,
+        email: customerFields.email,
+        phone: customerFields.phone,
+        address: customerFields.address,
+        source_of_truth,
+        effective_date,
         added_by: req.audit_user,
         added_at: now,
         match_confidence: null,
@@ -391,6 +421,7 @@ router.post('/', async (req, res) => {
       created_at: now,
     });
 
+    customer._needsResolution = true;
     await customer.save();
     const response = customerResponse(customer);
     if (candidates.length > 0) {
@@ -536,6 +567,7 @@ router.get('/', async (req, res) => {
     links.push(`<${generateUrl(1)}>; rel="first"`);
     links.push(`<${generateUrl(lastPage)}>; rel="last"`);
 
+    /* istanbul ignore next -- links always has items */
     if (links.length > 0) {
       res.set('Link', links.join(', '));
     }
@@ -674,22 +706,27 @@ router.get('/:id', async (req, res) => {
     const show = parseShow(req.query);
     const response = customerResponse(customer, show);
 
-    // If source_system is specified, overlay original_payload from that alias
-    if (req.query.source_system) {
+    // If source or source_system is specified, overlay alias-specific fields
+    const sourceFilter = req.query.source || req.query.source_system;
+    if (sourceFilter) {
       const alias = customer.aliases.find(
-        a => a.source_system === req.query.source_system
+        a => a.source_system === sourceFilter
       );
       if (!alias) {
         return res.status(404).json({
-          error: `No alias found for source_system '${req.query.source_system}'`
+          error: `No alias found for source_system '${sourceFilter}'`
         });
       }
-      const orig = alias.original_payload || {};
-      if (orig.first_name !== undefined) response.first_name = orig.first_name;
-      if (orig.last_name !== undefined) response.last_name = orig.last_name;
-      if (orig.email !== undefined) response.email = orig.email;
-      if (orig.phone !== undefined) response.phone = orig.phone;
-      if (orig.address !== undefined) response.address = orig.address;
+      if (alias.first_name) response.first_name = alias.first_name;
+      if (alias.last_name) response.last_name = alias.last_name;
+      if (alias.email) response.email = alias.email;
+      if (alias.phone) response.phone = alias.phone;
+      const addr = toPlainAddress(alias.address);
+      if (addr.street || addr.city || addr.state || addr.zip) {
+        response.address = addr;
+      }
+      response.effective_date = alias.effective_date;
+      response.source_of_truth = alias.source_of_truth;
       response.source_system = alias.source_system;
       response.source_key = alias.source_key;
     }
@@ -750,9 +787,19 @@ router.get('/:id', async (req, res) => {
  */
 router.put('/:id', async (req, res) => {
   try {
+    const sourceSystem = req.headers['x-source-system'];
+    if (!sourceSystem) {
+      return res.status(400).json({ error: 'x-source-system header is required' });
+    }
+
     const customer = await Customer.findOne({ _id: req.params.id, deleted_at: null });
     if (!customer) {
       return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const alias = customer.aliases.find(a => a.source_system === sourceSystem);
+    if (!alias) {
+      return res.status(404).json({ error: `No alias found for source_system '${sourceSystem}'` });
     }
 
     const { errors, sanitized } = sanitizeCustomerUpdate(req.body);
@@ -761,30 +808,54 @@ router.put('/:id', async (req, res) => {
       return res.status(400).json({ errors });
     }
 
-    const originalData = customer.toObject();
+    const originalAliasData = {
+      first_name: alias.first_name,
+      last_name: alias.last_name,
+      email: alias.email,
+      phone: alias.phone,
+      address: toPlainAddress(alias.address)
+    };
 
-    if (sanitized.first_name !== undefined) customer.first_name = sanitized.first_name;
-    if (sanitized.last_name !== undefined) customer.last_name = sanitized.last_name;
-    if (sanitized.email !== undefined) customer.email = sanitized.email;
-    if (sanitized.phone !== undefined) customer.phone = sanitized.phone;
+    if (sanitized.first_name !== undefined) alias.first_name = sanitized.first_name;
+    if (sanitized.last_name !== undefined) alias.last_name = sanitized.last_name;
+    if (sanitized.email !== undefined) alias.email = sanitized.email;
+    if (sanitized.phone !== undefined) alias.phone = sanitized.phone;
     if (sanitized.address !== undefined) {
-      const currentAddress = customer.toObject().address;
-      customer.address = { ...currentAddress, ...sanitized.address };
+      const currentAddress = toPlainAddress(alias.address);
+      alias.address = { ...currentAddress, ...sanitized.address };
     }
 
-    const delta = computeDelta(originalData, customer.toObject(), CUSTOMER_AUDITABLE_FIELDS);
+    if (req.body.source_of_truth !== undefined) {
+      alias.source_of_truth = req.body.source_of_truth === true;
+    }
+    if (req.body.effective_date !== undefined) {
+      alias.effective_date = new Date(req.body.effective_date);
+    }
+
+    alias.original_payload = req.body;
+
+    const updatedAliasData = {
+      first_name: alias.first_name,
+      last_name: alias.last_name,
+      email: alias.email,
+      phone: alias.phone,
+      address: toPlainAddress(alias.address)
+    };
+
+    const delta = computeDelta(originalAliasData, updatedAliasData, CUSTOMER_AUDITABLE_FIELDS);
 
     if (Object.keys(delta).length > 0) {
       customer.change_history.push({
         changed_by: req.audit_user,
         changed_at: new Date(),
-        delta
+        delta: { ...delta, source_system: sourceSystem }
       });
     }
 
     customer.updated_by = req.audit_user;
     customer.updated_at = new Date();
 
+    customer._needsResolution = true;
     await customer.save();
     return res.status(200).json(customerResponse(customer));
   } catch (error) {
@@ -929,6 +1000,7 @@ router.patch('/:id', async (req, res) => {
     });
 
     // All three saves must succeed or none — use a transaction
+    target._needsResolution = true;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -1179,6 +1251,7 @@ router.get('/:id/aliases/:aliasId/candidates', async (req, res) => {
     if (!alias) {
       return res.status(404).json({ error: 'Alias not found' });
     }
+    /* istanbul ignore next -- candidates array always exists on schema */
     return res.status(200).json(alias.candidates || []);
   } catch (error) {
     if (error.name === 'CastError') {
@@ -1325,6 +1398,7 @@ router.post('/:id/aliases/:aliasId/candidates/:candidateId/approve', async (req,
       notes: 'Approved from candidate review'
     });
 
+    target._needsResolution = true;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {

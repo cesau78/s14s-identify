@@ -166,6 +166,64 @@ describe('GET /match-quality', () => {
     expect(res.body.f1).toBe(1);
   });
 
+  test('computes recall when false negatives exist', async () => {
+    // Create auto-match (1 TP) plus a false_negative record
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send(validCustomerPayload);
+
+    await request(app)
+      .post('/customers')
+      .set('x-user-id', 'tester')
+      .send({
+        ...validCustomerPayload,
+        source_system: 'ERP',
+        source_key: 'ERP-001'
+      });
+
+    // Add a false negative (manual merge that system missed)
+    await new MatchFeedback({
+      type: 'false_negative',
+      customer_id: new mongoose.Types.ObjectId(),
+      related_customer_id: new mongoose.Types.ObjectId(),
+      reported_by: 'reviewer'
+    }).save();
+
+    const res = await request(app).get('/match-quality');
+    expect(res.status).toBe(200);
+    // totalAutoMatches=1, FP=0, FN=1, TP=1
+    // recall = TP/(TP+FN) = 1/2 = 0.5  (hits true branch of recall)
+    expect(res.body.recall).toBe(0.5);
+    expect(res.body.true_positives).toBe(1);
+    expect(res.body.false_negatives).toBe(1);
+  });
+
+  test('returns f1=0 when both precision and recall are zero', async () => {
+    // No auto-matches but both FP and FN feedback exist
+    // FP=1, FN=1, totalAutoMatches=0 → TP=0
+    // precision = 0/(0+1) = 0, recall = 0/(0+1) = 0 → f1 = 0
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: new mongoose.Types.ObjectId(),
+      alias_id: new mongoose.Types.ObjectId(),
+      original_confidence: 0.96,
+      reported_by: 'reviewer'
+    }).save();
+    await new MatchFeedback({
+      type: 'false_negative',
+      customer_id: new mongoose.Types.ObjectId(),
+      related_customer_id: new mongoose.Types.ObjectId(),
+      reported_by: 'reviewer'
+    }).save();
+
+    const res = await request(app).get('/match-quality');
+    expect(res.status).toBe(200);
+    expect(res.body.precision).toBe(0);
+    expect(res.body.recall).toBe(0);
+    expect(res.body.f1).toBe(0);
+  });
+
   test('returns correct metrics with auto-matches and feedback', async () => {
     // Create customer and auto-match to generate true positives
     await request(app)
@@ -245,6 +303,29 @@ describe('GET /match-quality/tune', () => {
     expect(res.body.action).toBe('loosen');
     expect(res.body.suggested_threshold).toBeLessThan(res.body.current_threshold);
   });
+
+  test('returns no adjustment when feedback is balanced', async () => {
+    // Equal FP and FN → fpRate = fnRate = 0.5 → action: 'none'
+    await new MatchFeedback({
+      type: 'false_positive',
+      customer_id: new mongoose.Types.ObjectId(),
+      alias_id: new mongoose.Types.ObjectId(),
+      original_confidence: 0.96,
+      reported_by: 'reviewer'
+    }).save();
+    await new MatchFeedback({
+      type: 'false_negative',
+      customer_id: new mongoose.Types.ObjectId(),
+      related_customer_id: new mongoose.Types.ObjectId(),
+      reported_by: 'reviewer'
+    }).save();
+
+    const res = await request(app).get('/match-quality/tune');
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('none');
+    expect(res.body.reason).toMatch(/balanced/);
+    expect(res.body.suggested_threshold).toBe(res.body.current_threshold);
+  });
 });
 
 describe('GET /match-quality/feedback', () => {
@@ -316,6 +397,44 @@ describe('GET /match-quality/feedback', () => {
     expect(resolved.status).toBe(200);
     expect(resolved.body).toHaveLength(1);
     expect(resolved.body[0].resolved).toBe(true);
+  });
+});
+
+describe('GET /match-quality 500 errors', () => {
+  test('returns 500 when metrics aggregation fails', async () => {
+    const spy = jest.spyOn(Customer, 'aggregate').mockRejectedValueOnce(new Error('db error'));
+
+    const res = await request(app).get('/match-quality');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+
+    spy.mockRestore();
+  });
+});
+
+describe('GET /match-quality/tune 500 errors', () => {
+  test('returns 500 when suggestWeightAdjustments throws', async () => {
+    const spy = jest.spyOn(MatchFeedback, 'countDocuments').mockRejectedValueOnce(new Error('db error'));
+
+    const res = await request(app).get('/match-quality/tune');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+
+    spy.mockRestore();
+  });
+});
+
+describe('GET /match-quality/feedback 500 errors', () => {
+  test('returns 500 when feedback query fails', async () => {
+    const spy = jest.spyOn(MatchFeedback, 'find').mockImplementationOnce(() => {
+      throw new Error('db error');
+    });
+
+    const res = await request(app).get('/match-quality/feedback');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Internal server error');
+
+    spy.mockRestore();
   });
 });
 

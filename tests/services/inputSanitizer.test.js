@@ -197,6 +197,39 @@ describe('Input Sanitizer', () => {
       const { errors } = sanitizeCustomerInput({ source_system: '', source_key: '', first_name: '', last_name: '', email: '' });
       expect(errors.length).toBeGreaterThanOrEqual(4);
     });
+
+    test('defaults source_of_truth to false', () => {
+      const { sanitized } = sanitizeCustomerInput(validInput);
+      expect(sanitized.source_of_truth).toBe(false);
+    });
+
+    test('accepts source_of_truth true', () => {
+      const { sanitized } = sanitizeCustomerInput({ ...validInput, source_of_truth: true });
+      expect(sanitized.source_of_truth).toBe(true);
+    });
+
+    test('defaults effective_date to current date', () => {
+      const before = new Date();
+      const { sanitized } = sanitizeCustomerInput(validInput);
+      const after = new Date();
+      expect(sanitized.effective_date.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(sanitized.effective_date.getTime()).toBeLessThanOrEqual(after.getTime());
+    });
+
+    test('accepts explicit effective_date', () => {
+      const { sanitized } = sanitizeCustomerInput({ ...validInput, effective_date: '2025-06-15' });
+      expect(sanitized.effective_date).toEqual(new Date('2025-06-15'));
+    });
+
+    test('returns error for invalid effective_date', () => {
+      const { errors } = sanitizeCustomerInput({ ...validInput, effective_date: 'not-a-date' });
+      expect(errors).toContain('effective_date is not a valid date');
+    });
+
+    test('does not formalize nicknames', () => {
+      const { sanitized } = sanitizeCustomerInput({ ...validInput, first_name: 'Chuck' });
+      expect(sanitized.first_name).toBe('Chuck');
+    });
   });
 
   describe('sanitizeCustomerUpdate', () => {
