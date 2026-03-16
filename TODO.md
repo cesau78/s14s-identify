@@ -1,7 +1,4 @@
 # Next
-- update logic flow diagrams
-  - make separate diagrams for POST /customers
-
 - the current logic only saves the score for one of the two algorithms used.  i'd like to save the scores for both in separate fields so we can better understand how things are working.  we might need to use a combination when making a determination about matching, but ultimately we might be ablle to better triage scenarios where a name is a good match, but an address isnt - "do we need to update the address, or is it a different person"?
 
 

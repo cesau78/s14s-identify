@@ -112,60 +112,113 @@ This means source systems can POST freely without worrying about duplicates. The
 
 The threshold is not a fixed constant — it is tunable via the [F1 feedback loop](#match-quality-and-f1-feedback-loop) based on real-world match accuracy.
 
-### Logic Flow
+### Logic Flow Diagrams
 
-The following diagram illustrates the control flow for the `POST /customers` endpoint:
+Each resource and action has its own control flow diagram below, grouped by resource.
+
+---
+
+#### POST /sources
 
 ```mermaid
 graph TD
-    A[Start: POST /customers request] --> B{Sanitize Input & Validate};
-    B -- Validation Fails --> C[Return 400 Bad Request];
-    B -- Validation OK --> SV{Source System Registered?};
-    SV -- No --> C;
-    SV -- Yes --> SC{Source Key Collision?};
-    SC -- Yes, Aligned --> SCU[Update Alias Payload → 200];
-    SC -- Yes, Misaligned --> SCC[Return 409 Collision];
-    SC -- No --> N[Normalize Nicknames to Formal Names];
-    N --> D[Generate Search Tokens];
-    D --> E[Query DB for Candidates];
-    E --> F{Iterate through Candidates};
-    F -- For each candidate --> G[Calculate Fellegi-Sunter Score];
-    G --> F;
-    F -- All candidates scored --> H{Best Score >= Auto-Approve?};
-    H -- Yes --> I[Add Alias to Matched Record];
-    I --> K[Save Record & Audit Trail];
-    K --> L[Return 200 OK with Matched Customer];
-    H -- No --> NM{Any Candidates >= Review Threshold?};
-    NM -- Yes --> J2[Create New Record + Pending Matches];
-    NM -- No --> J[Create New Customer Record];
-    J --> K2[Save Record];
-    J2 --> K2;
-    K2 --> L2[Return 201 Created];
-    L --> M[End];
-    C --> M;
-    L2 --> M;
-    SCU --> M;
-    SCC --> M;
+    A[POST /sources] --> B{Validate Body}
+    B -- Missing name --> E400[Return 400 Bad Request]
+    B -- Invalid reviewers --> E400
+    B -- Valid --> C[Lowercase reviewer emails]
+    C --> D[Create Source document]
+    D --> E{Name unique?}
+    E -- No → duplicate key --> E409[Return 409 Conflict]
+    E -- Yes --> F[Save with created_by / created_at]
+    F --> G[Return 201 Created]
+```
 
-    subgraph Review Workflow
-        PM[GET /:id/aliases/:aliasId/candidates] --> RV{Reviewer Decision};
-        RV -- Approve --> AP[POST /.../candidates/:id/approve → Merge];
-        RV -- Reject --> RJ[POST /.../candidates/:id/reject → Distinct];
-        AP --> FB2[Record false_negative feedback];
-    end
+#### GET /sources
+
+```mermaid
+graph TD
+    A[GET /sources] --> B{include_deleted=true?}
+    B -- Yes --> C[Query: all sources]
+    B -- No --> D[Query: deleted_at = null]
+    C --> E[Sort by name ascending]
+    D --> E
+    E --> F[Return 200 with source array]
+```
+
+#### GET /sources/:id
+
+```mermaid
+graph TD
+    A[GET /sources/:id] --> B[Query by ID + deleted_at: null]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Return 200 with source]
+```
+
+#### PUT /sources/:id
+
+```mermaid
+graph TD
+    A[PUT /sources/:id] --> B[Find source by ID]
+    B --> C{Found + active?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E{Validate body}
+    E -- Invalid --> F[Return 400]
+    E -- Valid --> G[Apply updates + set updated_by/updated_at]
+    G --> H{Name changed + unique?}
+    H -- Duplicate --> I[Return 409 Conflict]
+    H -- OK --> J[Save document]
+    J --> K[Return 200 with updated source]
+```
+
+#### DELETE /sources/:id
+
+```mermaid
+graph TD
+    A[DELETE /sources/:id] --> B[Find source by ID + active]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Set deleted_by + deleted_at]
+    E --> F[Save document]
+    F --> G[Return 200 OK]
+```
+
+---
+
+#### POST /customers
+
+```mermaid
+graph TD
+    A[POST /customers] --> B{Sanitize & Validate Input}
+    B -- Errors --> C[Return 400 Bad Request]
+    B -- Valid --> SV{Source System Registered?}
+    SV -- No --> C
+    SV -- Yes --> SC{Source Key Collision?}
+    SC -- Yes --> SCA{Data Aligned? ≥ 0.70}
+    SCA -- Yes --> SCU[Update Alias Payload → 200]
+    SCA -- No --> SCC[Return 409 Collision]
+    SC -- No --> N[Normalize Nicknames to Formal Names]
+    N --> D[Generate Search Tokens]
+    D --> E[Query DB for Candidates via Token Index]
+    E --> F{Iterate Candidates}
+    F -- For each --> G[Calculate Fellegi-Sunter Score]
+    G --> F
+    F -- All scored --> H{Best Score ≥ 0.95?}
+    H -- Yes --> I[Add Alias to Matched Record]
+    I --> K[Save Record + Audit Trail]
+    K --> L[Return 200 with Matched Customer]
+    H -- No --> NM{Any Score ≥ 0.70?}
+    NM -- Yes --> J2[Create New Record + Pending Candidates]
+    NM -- No --> J[Create New Customer Record]
+    J --> K2[Save Record]
+    J2 --> K2
+    K2 --> L2[Return 201 Created]
 
     style H fill:#f9f,stroke:#333
     linkStyle default stroke:#333
-
-    subgraph Feedback Loop
-        Q[User reports false positive] --> R[POST /:id/aliases/:aliasId/feedback];
-        S[User merges missed match] --> T[PATCH /:id with merge];
-        R --> U[GET /match-quality → F1 score];
-        T --> U;
-        U --> V[GET /match-quality/tune → suggested adjustments];
-        V -. adjust threshold & weights .-> H;
-    end
 ```
+
+**Steps:**
 
 1.  **Sanitization**: All incoming data is cleaned, validated, and [nickname-normalized](#nickname-normalization).
 2.  **Source Validation**: The `source_system` must be [registered](#source-system-registration) or the request is rejected with 400.
@@ -177,8 +230,296 @@ graph TD
     - **>= auto-approve** (0.95): alias linked automatically (200)
     - **>= review threshold** (0.70): new record created with `candidates` on the alias for manual review (201)
     - **< review threshold**: new record created, no candidates (201)
-8.  **Review Workflow**: Pending matches can be approved (triggering a merge) or rejected (confirming distinct records). Approvals feed the F1 loop as false negatives.
-9.  **Feedback Loop**: Users report false positives (incorrect matches) or perform manual merges (false negatives). The F1 metrics endpoint computes precision and recall, and the tuning endpoint suggests threshold and weight adjustments.
+
+#### GET /customers
+
+```mermaid
+graph TD
+    A[GET /customers] --> B{under_review=true?}
+    B -- Yes --> C[Query MatchFeedback for unresolved false_positives]
+    C --> D[Deduplicate by customer_id, preserve feedback order]
+    D --> E[Fetch customers by IDs]
+    B -- No --> F{include_deleted=true?}
+    F -- Yes --> G[Query: all customers]
+    F -- No --> H[Query: deleted_at = null]
+    G --> I[Apply pagination: page, limit]
+    H --> I
+    E --> I
+    I --> J[Set headers: X-Total-Count, X-Page, X-Limit, Link]
+    J --> K[Return 200 with customer array]
+```
+
+#### GET /customers/search
+
+```mermaid
+graph TD
+    A["GET /customers/search?q=..."] --> B{q length ≥ 2?}
+    B -- No --> C[Return 400]
+    B -- Yes --> D[Lowercase query]
+    D --> E[Generate prefix tokens from query]
+    E --> F[Expand nicknames to formal equivalents]
+    F --> G["Query: search_tokens $in prefix tokens, deleted_at: null"]
+    G --> H[Apply limit, default 20, max 100]
+    H --> I[Return 200 with matching customers]
+```
+
+#### GET /customers/:id
+
+```mermaid
+graph TD
+    A[GET /customers/:id] --> B[Find by ID]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E{merged_into set?}
+    E -- Yes --> F["Return 301 + Location: /customers/:targetId"]
+    E -- No --> G{deleted_at set?}
+    G -- Yes --> D
+    G -- No --> H{source_system param?}
+    H -- Yes --> I[Find alias for source_system]
+    I --> J{Alias found?}
+    J -- No --> D
+    J -- Yes --> K[Overlay original_payload fields onto response]
+    K --> L[Return 200]
+    H -- No --> L
+```
+
+#### PUT /customers/:id
+
+```mermaid
+graph TD
+    A[PUT /customers/:id] --> B{Validate update body}
+    B -- Errors --> C[Return 400]
+    B -- Valid --> D[Find customer by ID + active]
+    D --> E{Found?}
+    E -- No --> F[Return 404]
+    E -- Yes --> G["Find alias matching x-source-system header"]
+    G --> H{Alias found?}
+    H -- No --> F
+    H -- Yes --> I[Update alias fields + original_payload]
+    I --> J[Compute audit delta: from → to]
+    J --> K[Append to change_history]
+    K --> L["Set _needsResolution flag"]
+    L --> M["Pre-save: resolveCustomerFields from all aliases"]
+    M --> N[Regenerate search_tokens]
+    N --> O[Save document]
+    O --> P[Return 200 with updated customer]
+```
+
+#### PATCH /customers/:id (Merge)
+
+```mermaid
+graph TD
+    A["PATCH /customers/:id {merge: sourceId}"] --> B{Target exists + active?}
+    B -- No --> C[Return 404]
+    B -- Yes --> D{Source exists + active?}
+    D -- No --> E[Return 404 / 400]
+    D -- Yes --> F{Source already merged?}
+    F -- Yes --> G[Return 400]
+    F -- No --> H{Target = Source?}
+    H -- Yes --> G
+    H -- No --> I[Start MongoDB Transaction]
+
+    I --> J[Transfer source aliases → target]
+    J --> K[Clear source aliases]
+    K --> L[Audit entry on target: merge]
+    L --> M["Soft-delete source: merged_into = target ID"]
+    M --> N[Audit entry on source: merged]
+    N --> O["Create MatchFeedback: false_negative"]
+    O --> P[Save target + source + feedback in transaction]
+
+    P --> Q{Transaction success?}
+    Q -- No --> R[Rollback → Return 500]
+    Q -- Yes --> S[Return 200 with merged target]
+```
+
+#### DELETE /customers/:id
+
+```mermaid
+graph TD
+    A[DELETE /customers/:id] --> B[Find by ID + active]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Set deleted_by + deleted_at]
+    E --> F[Append soft_delete to change_history]
+    F --> G[Save document]
+    G --> H[Return 200 OK]
+```
+
+#### GET /customers/:id/aliases
+
+```mermaid
+graph TD
+    A[GET /customers/:id/aliases] --> B[Find customer by ID]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Return 200 with aliases array]
+```
+
+#### GET /customers/:id/changes
+
+```mermaid
+graph TD
+    A[GET /customers/:id/changes] --> B[Find customer by ID]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Return 200 with change_history array]
+```
+
+#### POST /customers/:id/aliases/:aliasId/feedback
+
+```mermaid
+graph TD
+    A[POST /:id/aliases/:aliasId/feedback] --> B[Find customer + alias]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E{Alias has match_confidence?}
+    E -- No / null --> F[Return 400: not an auto-match]
+    E -- Yes --> G[Create MatchFeedback record]
+    G --> H["type: false_positive"]
+    H --> I[Set customer_id, alias_id, original_confidence]
+    I --> J[Set reported_by, notes, resolved: false]
+    J --> K[Save feedback]
+    K --> L[Return 201 with feedback record]
+```
+
+#### GET /customers/:id/aliases/:aliasId/candidates
+
+```mermaid
+graph TD
+    A[GET /:id/aliases/:aliasId/candidates] --> B[Find customer + alias]
+    B --> C{Found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E[Return 200 with candidates array]
+```
+
+#### POST /.../candidates/:candidateId/approve
+
+```mermaid
+graph TD
+    A["POST /:id/aliases/:aliasId/candidates/:candidateId/approve"] --> B[Find source customer + alias + candidate]
+    B --> C{All found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E{Candidate status = pending?}
+    E -- No --> F[Return 400: already reviewed]
+    E -- Yes --> G[Find target customer by candidate_id]
+    G --> H{Target exists?}
+    H -- No --> D
+    H -- Yes --> I["Mark candidate: approved"]
+    I --> J[Reject all other pending candidates on alias]
+    J --> K[Start MongoDB Transaction]
+
+    K --> L[Transfer source aliases → target]
+    L --> M[Clear source aliases]
+    M --> N[Audit entry on target: merge]
+    N --> O["Soft-delete source: merged_into = target"]
+    O --> P["Create MatchFeedback: false_negative"]
+    P --> Q[Save target + source + feedback in transaction]
+
+    Q --> R{Transaction success?}
+    R -- No --> S[Rollback → Return 500]
+    R -- Yes --> T[Return 200 with target customer]
+```
+
+#### POST /.../candidates/:candidateId/reject
+
+```mermaid
+graph TD
+    A["POST /:id/aliases/:aliasId/candidates/:candidateId/reject"] --> B[Find customer + alias + candidate]
+    B --> C{All found?}
+    C -- No --> D[Return 404]
+    C -- Yes --> E{Candidate status = pending?}
+    E -- No --> F[Return 400: already reviewed]
+    E -- Yes --> G["Mark candidate: rejected"]
+    G --> H[Set reviewed_by + reviewed_at]
+    H --> I[Save customer document]
+    I --> J[Return 200 with candidate]
+```
+
+---
+
+#### GET /match-quality
+
+```mermaid
+graph TD
+    A[GET /match-quality] --> B[Count total auto-matches from aliases]
+    B --> C[Count false_positive feedback records]
+    C --> D[Count false_negative feedback records]
+    D --> E["TP = auto-matches − false_positives"]
+    E --> F["Precision = TP / (TP + FP)"]
+    F --> G["Recall = TP / (TP + FN)"]
+    G --> H["F1 = 2 × P × R / (P + R)"]
+    H --> I[Return 200 with metrics]
+```
+
+#### GET /match-quality/tune
+
+```mermaid
+graph TD
+    A[GET /match-quality/tune] --> B[Count FP and FN feedback]
+    B --> C["fpRate = FP / (FP + FN)"]
+    C --> D{fpRate > 50%?}
+    D -- Yes --> E["Action: tighten"]
+    E --> F["Reduce m values −2%, increase u +0.1%"]
+    F --> G[Raise match_threshold +1%]
+    D -- No --> H{fnRate > 50%?}
+    H -- Yes --> I["Action: loosen"]
+    I --> J["Increase m values +2%, reduce u −0.05%"]
+    J --> K[Lower match_threshold −1%]
+    H -- No --> L["Action: none"]
+    G --> M[Return 200 with current + suggested weights]
+    K --> M
+    L --> M
+```
+
+#### GET /match-quality/feedback
+
+```mermaid
+graph TD
+    A[GET /match-quality/feedback] --> B{type filter?}
+    B -- Yes --> C[Filter by false_positive or false_negative]
+    B -- No --> D[No type filter]
+    C --> E{resolved filter?}
+    D --> E
+    E -- Yes --> F[Filter by resolved status]
+    E -- No --> G[No resolved filter]
+    F --> H[Sort by reported_at descending]
+    G --> H
+    H --> I[Return 200 with feedback array]
+```
+
+---
+
+#### Review Workflow (Cross-Endpoint)
+
+This diagram shows how multiple endpoints connect to form the candidate review workflow:
+
+```mermaid
+graph TD
+    A[POST /customers → 201 with candidates] --> B[Reviewer views candidates]
+    B --> C[GET /:id/aliases/:aliasId/candidates]
+    C --> D{Reviewer Decision}
+    D -- Approve --> E[POST /.../candidates/:id/approve]
+    D -- Reject --> F[POST /.../candidates/:id/reject]
+    E --> G["Merge records (transaction)"]
+    G --> H["Record false_negative feedback"]
+    H --> I[F1 metrics updated]
+    F --> J[Candidate marked rejected]
+```
+
+#### Feedback Loop (Cross-Endpoint)
+
+This diagram shows how feedback flows through the F1 tuning system:
+
+```mermaid
+graph TD
+    A[User reports false positive] --> B[POST /:id/aliases/:aliasId/feedback]
+    C[User merges missed match] --> D[PATCH /:id with merge]
+    D --> E["Auto-records false_negative"]
+    B --> F[GET /match-quality → F1 score]
+    E --> F
+    F --> G[GET /match-quality/tune → suggested adjustments]
+    G -. adjust threshold & weights .-> H[POST /customers matching engine]
+```
 
 ---
 
